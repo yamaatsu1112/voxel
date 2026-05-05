@@ -1,0 +1,23 @@
+[package]
+name = "engine-app"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+too_many_arguments = "allow"
+
+[dependencies]
+winit             = "0.30.12"
+ash               = "0.38.0"
+image             = "0.25"
+wayland-client       = "0.31"
+wayland-protocols    = "0.32"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+engine-macro = { path = "../macro", package = "engine-macro" }
+engine-ecs = { path = "../ecs", package = "engine-ecs" }
+engine-input = { path = "../input", package = "engine-input" }
+engine-types = { path = "../types", package = "engine-types" }
+log = { version = "0.4", optional = true }
+
+[features]
+gpu-profiling = ["dep:log"]

@@ -1,0 +1,15 @@
+[package]
+name = "engine-ui"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ash = "0.38.0"
+engine-app = { path = "../app", package = "engine-app" }
+engine-common = { path = "../common", package = "engine-common" }
+engine-input = { path = "../input", package = "engine-input" }
+engine-macro = { path = "../macro", package = "engine-macro" }

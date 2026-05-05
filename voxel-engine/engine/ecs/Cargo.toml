@@ -1,0 +1,10 @@
+[package]
+name = "engine-ecs"
+version = "0.1.0"
+edition = "2024"
+
+[lints.clippy]
+too_many_arguments = "allow"
+
+[dependencies]
+engine-macro = { path = "../macro", package = "engine-macro" }

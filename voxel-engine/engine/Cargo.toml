@@ -1,0 +1,38 @@
+[package]
+name = "voxel-engine"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+
+[workspace]
+resolver = "2"
+members = [
+    "app",
+    "common",
+    "default",
+    "ecs",
+    "input",
+    "macro",
+    "ui",
+    "types",
+    "voxel",
+]
+
+[features]
+gpu-profiling = ["engine-app/gpu-profiling"]
+
+[dependencies]
+env_logger = "0.11"
+engine-app = { path = "app" }
+engine-common = { path = "common" }
+engine-default = { path = "default" }
+engine-input = { path = "input" }
+engine-macro = { path = "macro" }
+engine-ui = { path = "ui" }
+engine-voxel = { path = "voxel" }
+log = "0.4"

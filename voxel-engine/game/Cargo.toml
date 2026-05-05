@@ -1,0 +1,13 @@
+[package]
+name = "game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+noise = "0.9"
+voxel-engine = { path = "../engine", features = ["gpu-profiling"] }
+
+[build-dependencies]
+image = "0.25"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

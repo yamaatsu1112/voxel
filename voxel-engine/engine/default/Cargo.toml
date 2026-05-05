@@ -1,0 +1,16 @@
+[package]
+name = "engine-default"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+ash = "0.38.0"
+engine-app = { path = "../app", package = "engine-app" }
+engine-common = { path = "../common", package = "engine-common" }
+engine-input = { path = "../input", package = "engine-input" }
+engine-macro = { path = "../macro", package = "engine-macro" }
+engine-ui = { path = "../ui", package = "engine-ui" }
+engine-voxel = { path = "../voxel", package = "engine-voxel" }
