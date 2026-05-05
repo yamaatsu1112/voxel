@@ -1,5 +1,7 @@
 # Voxel Research Notes
 
+面談用
+
 個人的に進めている voxel / GPU アルゴリズム実験のリポジトリ。
 
 主な関心は、voxel データを大規模に生成・変化させるためのデータ構造と、その編集処理を GPU 上で高速に実行する方法にある。現在は特に Sparse Voxel Octree (SVO) 周辺の編集アルゴリズム、CUDA 実装、Hash DAG への応用を試している。
