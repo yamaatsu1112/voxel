@@ -14,6 +14,8 @@ constexpr std::uint32_t kTerminalAxisX = 0u;
 constexpr std::uint32_t kTerminalAxisY = 1u;
 constexpr std::uint32_t kTerminalAxisZ = 2u;
 
+inline constexpr std::uint32_t kTerminalLeafBrickGroupCapacity = 8u;
+
 struct TerminalAxisInterval {
   std::int32_t start;
   std::uint32_t log_size;
@@ -348,15 +350,21 @@ emit_terminal_node_leaf_request_device(const TerminalNodeInput &input,
 __device__ inline TerminalRequest
 emit_terminal_leaf_request_device(const TerminalLeafInput &input,
                                   std::uint32_t local_index) {
+  std::uint32_t prefixes[kTerminalLeafBrickGroupCapacity]{};
+  std::uint64_t masks[kTerminalLeafBrickGroupCapacity]{};
+  std::uint32_t valid_mask = 0u;
   std::uint32_t leaf_x = 0u;
   std::uint32_t leaf_y = 0u;
   std::uint32_t leaf_z = 0u;
-  terminal_prefix_to_leaf_coord(kMaxDepth, input.leafPrefix, leaf_x, leaf_y,
-                                leaf_z);
+  if (!terminal_prefix_to_leaf_coord(kMaxDepth, input.leafPrefix, leaf_x,
+                                     leaf_y, leaf_z)) {
+    return {};
+  }
 
   for (std::uint32_t bit = 0u; bit < 64u; ++bit) {
     if ((input.mask64 & (1ull << bit)) == 0u)
       continue;
+
     const std::int32_t local_x =
         static_cast<std::int32_t>(bit & (kLeafVoxelCount - 1u));
     const std::int32_t local_y = static_cast<std::int32_t>(
@@ -378,10 +386,6 @@ emit_terminal_leaf_request_device(const TerminalLeafInput &input,
         world_z >= static_cast<std::int32_t>(kWorldVoxelCount)) {
       continue;
     }
-    if (local_index != 0u) {
-      --local_index;
-      continue;
-    }
 
     const std::int32_t out_leaf_x =
         world_x >> static_cast<std::int32_t>(kLeafVoxelCountExp);
@@ -395,13 +399,27 @@ emit_terminal_leaf_request_device(const TerminalLeafInput &input,
          << kLeafVoxelCountExp) |
         (static_cast<std::uint32_t>(world_z & (kLeafVoxelCount - 1u))
          << (kLeafVoxelCountExp * 2u));
-    const std::uint64_t mask = 1ull << out_bit;
-    return make_terminal_brick_request(
-        {static_cast<std::uint32_t>(
-             terminal_leaf_prefix(out_leaf_x, out_leaf_y, out_leaf_z)),
-         mask});
+    const std::uint32_t prefix = static_cast<std::uint32_t>(
+        terminal_leaf_prefix(out_leaf_x, out_leaf_y, out_leaf_z));
+    std::uint32_t slot = 0u;
+    bool found = false;
+    for (; slot < kTerminalLeafBrickGroupCapacity; ++slot) {
+      if (((valid_mask >> slot) & 1u) != 0u && prefixes[slot] == prefix) {
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      slot = static_cast<std::uint32_t>(__popc(valid_mask));
+      prefixes[slot] = prefix;
+      valid_mask |= 1u << slot;
+    }
+    masks[slot] |= 1ull << out_bit;
   }
-  return {};
+
+  return make_terminal_brick_request({prefixes[local_index],
+                                      masks[local_index]});
 }
 
 __device__ inline std::uint32_t

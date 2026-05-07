@@ -94,10 +94,11 @@ count_terminal_leaf_requests_device(const TerminalLeafInput &input) {
     return 0u;
   }
 
-  std::uint32_t count = 0u;
+  std::uint32_t leaf_mask = 0u;
   for (std::uint32_t bit = 0u; bit < 64u; ++bit) {
     if ((input.mask64 & (1ull << bit)) == 0u)
       continue;
+
     const std::int32_t local_x =
         static_cast<std::int32_t>(bit & (kLeafVoxelCount - 1u));
     const std::int32_t local_y = static_cast<std::int32_t>(
@@ -113,14 +114,22 @@ count_terminal_leaf_requests_device(const TerminalLeafInput &input) {
     const std::int32_t world_z =
         static_cast<std::int32_t>(leaf_z * kLeafVoxelCount) + local_z +
         input.worldOffsetZ;
-    if (world_x >= 0 && world_y >= 0 && world_z >= 0 &&
-        world_x < static_cast<std::int32_t>(kWorldVoxelCount) &&
-        world_y < static_cast<std::int32_t>(kWorldVoxelCount) &&
-        world_z < static_cast<std::int32_t>(kWorldVoxelCount)) {
-      ++count;
+    if (world_x < 0 || world_y < 0 || world_z < 0 ||
+        world_x >= static_cast<std::int32_t>(kWorldVoxelCount) ||
+        world_y >= static_cast<std::int32_t>(kWorldVoxelCount) ||
+        world_z >= static_cast<std::int32_t>(kWorldVoxelCount)) {
+      continue;
     }
+
+    const std::uint32_t leaf_bit =
+        ((static_cast<std::uint32_t>(world_x) >> kLeafVoxelCountExp) & 1u) |
+        (((static_cast<std::uint32_t>(world_y) >> kLeafVoxelCountExp) & 1u)
+         << 1u) |
+        (((static_cast<std::uint32_t>(world_z) >> kLeafVoxelCountExp) & 1u)
+         << 2u);
+    leaf_mask |= 1u << leaf_bit;
   }
-  return count;
+  return static_cast<std::uint32_t>(__popc(leaf_mask));
 }
 
 __global__ void count_terminal_requests_kernel(const TerminalNodeInput *nodes,
