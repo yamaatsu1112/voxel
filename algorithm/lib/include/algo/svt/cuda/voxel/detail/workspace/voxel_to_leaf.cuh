@@ -28,9 +28,10 @@ inline std::size_t voxel_to_leaf_workspace_size(std::uint32_t count) {
     offset = align_up<std::uint32_t>(offset);
     offset += sizeof(std::uint32_t) * count;
     offset = align_up<std::max_align_t>(offset);
-    offset += algo::cuda::sort::required_pairs_workspace_size<std::uint32_t,
-                                                              std::uint32_t>(
-        count);
+    offset += algo::cuda::sort::required_sort_by_key_workspace_size<
+        std::uint32_t>(
+        count,
+        algo::cuda::sort::value_arrays(static_cast<std::uint32_t*>(nullptr)));
     offset = align_up<std::max_align_t>(offset);
     offset +=
         algo::cuda::scan::required_workspace_size_fused<std::uint32_t>(count);
@@ -45,8 +46,9 @@ inline VoxelToLeafWorkspace create_voxel_to_leaf_workspace(void* workspace,
     reserve_array(workspace, count, offset, result.local_bits);
     reserve_array(workspace, count, offset, result.run_offsets);
     result.sort_workspace_size =
-        algo::cuda::sort::required_pairs_workspace_size<std::uint32_t,
-                                                        std::uint32_t>(count);
+        algo::cuda::sort::required_sort_by_key_workspace_size<std::uint32_t>(
+            count,
+            algo::cuda::sort::value_arrays(static_cast<std::uint32_t*>(nullptr)));
     reserve_workspace<std::max_align_t>(workspace, result.sort_workspace_size,
                                         offset, result.sort_workspace);
     result.scan_workspace_size =

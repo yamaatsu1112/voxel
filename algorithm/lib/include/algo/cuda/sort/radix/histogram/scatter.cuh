@@ -4,6 +4,7 @@
 #include <algo/cuda/sort/radix/common.cuh>
 #include <algo/cuda/sort/radix/histogram/layout.cuh>
 #include <algo/cuda/sort/radix/local_rank.cuh>
+#include <algo/cuda/sort/value_arrays.cuh>
 
 namespace algo::cuda::sort::detail {
 
@@ -74,11 +75,11 @@ cudaError_t scatter_keys_histogram(
 }
 
 template <int BlockSize, int RadixBits, int ItemsPerThread,
-          class LocalRankPolicy, class Key, class Value>
-__global__ void scatter_pairs_histogram_kernel(
-    Key* output_keys, Value* output_values, const Key* input_keys,
-    const Value* input_values, const std::uint32_t* scanned_histograms,
-    std::uint32_t count, int shift) {
+          class LocalRankPolicy, class Key, class... Values>
+__global__ void scatter_by_key_histogram_kernel(
+    Key* output_keys, value_arrays_t<Values...> output_values,
+    const Key* input_keys, value_arrays_t<Values...> input_values,
+    const std::uint32_t* scanned_histograms, std::uint32_t count, int shift) {
     using local_rank = histogram_local_rank_impl<LocalRankPolicy>;
     constexpr std::uint32_t kNumBuckets =
         static_cast<std::uint32_t>(1u << RadixBits);
@@ -92,7 +93,6 @@ __global__ void scatter_pairs_histogram_kernel(
         warp_bucket_scratch[static_cast<std::size_t>(kWarpCount) * kNumBuckets];
 
     Key keys[ItemsPerThread];
-    Value values[ItemsPerThread];
     std::uint32_t digits[ItemsPerThread];
     std::uint32_t ranks[ItemsPerThread];
     bool valid_items[ItemsPerThread];
@@ -104,7 +104,6 @@ __global__ void scatter_pairs_histogram_kernel(
         const bool valid = global_index < count;
         const Key key = valid ? input_keys[global_index] : Key{};
         keys[item] = key;
-        values[item] = valid ? input_values[global_index] : Value{};
         digits[item] = valid ? extract_digit<RadixBits>(key, shift) : 0u;
         ranks[item] = 0;
         valid_items[item] = valid;
@@ -124,26 +123,31 @@ __global__ void scatter_pairs_histogram_kernel(
                         digit, blockIdx.x, num_blocks)];
             const std::uint32_t output_index =
                 block_bucket_base + ranks[item];
+            const std::uint32_t input_index =
+                warp_major_tile_index<BlockSize, ItemsPerThread>(tile_base,
+                                                                 item);
             output_keys[output_index] = keys[item];
-            output_values[output_index] = values[item];
+            copy_value_array_item(output_values, output_index, input_values,
+                          input_index);
         }
     }
 }
 
-template <class Key, class Value, int BlockSize, int RadixBits,
-          int ItemsPerThread, class LocalRankPolicy>
-cudaError_t scatter_pairs_histogram(
-    Key* output_keys, Value* output_values, const Key* input_keys,
-    const Value* input_values, const std::uint32_t* scanned_histograms,
-    std::uint32_t count, int shift, cudaStream_t stream) {
+template <class Key, int BlockSize, int RadixBits, int ItemsPerThread,
+          class LocalRankPolicy, class... Values>
+cudaError_t scatter_by_key_histogram(
+    Key* output_keys, value_arrays_t<Values...> output_values,
+    const Key* input_keys, value_arrays_t<Values...> input_values,
+    const std::uint32_t* scanned_histograms, std::uint32_t count, int shift,
+    cudaStream_t stream) {
     if (count == 0) return cudaSuccess;
     const auto grid = static_cast<unsigned int>(::algo::ceil_div(
         count, static_cast<std::uint32_t>(BlockSize * ItemsPerThread)));
-    scatter_pairs_histogram_kernel<BlockSize, RadixBits, ItemsPerThread,
-                                   LocalRankPolicy>
-        <<<grid, BlockSize, 0, stream>>>(output_keys, output_values, input_keys,
-                                         input_values, scanned_histograms,
-                                         count, shift);
+    scatter_by_key_histogram_kernel<BlockSize, RadixBits, ItemsPerThread,
+                                    LocalRankPolicy>
+        <<<grid, BlockSize, 0, stream>>>(output_keys, output_values,
+                                         input_keys, input_values,
+                                         scanned_histograms, count, shift);
     return cudaGetLastError();
 }
 
@@ -160,15 +164,16 @@ struct histogram_scatter_impl {
             output, input, layout.histograms, count, shift, stream);
     }
 
-    template <class Key, class Value, int BlockSize, int RadixBits,
-              int ItemsPerThread, class Layout>
+    template <class Key, int BlockSize, int RadixBits, int ItemsPerThread,
+              class Layout, class... Values>
     static cudaError_t
-    run_pairs(Key* output_keys, Value* output_values, const Key* input_keys,
-              const Value* input_values, const Layout& layout,
-              std::uint32_t count, int shift, cudaStream_t stream) {
-        return scatter_pairs_histogram<Key, Value, BlockSize,
-                                                 RadixBits, ItemsPerThread,
-                                                 LocalRankPolicy>(
+    run_by_key(Key* output_keys, value_arrays_t<Values...> output_values,
+               const Key* input_keys, value_arrays_t<Values...> input_values,
+               const Layout& layout, std::uint32_t count, int shift,
+               cudaStream_t stream) {
+        return scatter_by_key_histogram<Key, BlockSize, RadixBits,
+                                        ItemsPerThread, LocalRankPolicy,
+                                        Values...>(
             output_keys, output_values, input_keys, input_values,
             layout.histograms, count, shift, stream);
     }

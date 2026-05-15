@@ -3,6 +3,7 @@
 #include <algo/cuda/sort/radix/common.cuh>
 #include <algo/cuda/sort/radix/local_rank.cuh>
 #include <algo/cuda/sort/radix/onesweep/lookback.cuh>
+#include <algo/cuda/sort/value_arrays.cuh>
 
 namespace algo::cuda::sort::detail {
 
@@ -112,10 +113,11 @@ __global__ void onesweep_partition_keys_kernel(
 
 template <int BlockSize, int RadixBits, int ItemsPerThread,
           class BlockHistogramPolicy,
-          class LocalRankPolicy, class Key, class Value>
-__global__ void onesweep_partition_pairs_kernel(
-    Key *output_keys, Value *output_values, const Key *input_keys,
-    const Value *input_values, const std::uint32_t *global_offsets,
+          class LocalRankPolicy, class Key, class... Values>
+__global__ void onesweep_partition_by_key_kernel(
+    Key *output_keys, value_arrays_t<Values...> output_values,
+    const Key *input_keys, value_arrays_t<Values...> input_values,
+    const std::uint32_t *global_offsets,
     onesweep_lookback_record *lookback_records,
     std::uint32_t *tile_counter, std::uint32_t count, int shift) {
   using block_digits =
@@ -140,7 +142,6 @@ __global__ void onesweep_partition_pairs_kernel(
   __syncthreads();
 
   Key keys[ItemsPerThread];
-  Value values[ItemsPerThread];
   std::uint32_t digits[ItemsPerThread];
   std::uint32_t ranks[ItemsPerThread];
   bool valid_items[ItemsPerThread];
@@ -152,7 +153,6 @@ __global__ void onesweep_partition_pairs_kernel(
     const bool valid = global_index < count;
     const Key key = valid ? input_keys[global_index] : Key{};
     keys[item] = key;
-    values[item] = valid ? input_values[global_index] : Value{};
     digits[item] = valid ? extract_digit<RadixBits>(key, shift) : 0u;
     ranks[item] = 0;
     valid_items[item] = valid;
@@ -190,7 +190,9 @@ __global__ void onesweep_partition_pairs_kernel(
       const std::uint32_t output_index =
           global_offsets[digit] + block_prefix[digit] + ranks[item];
       output_keys[output_index] = keys[item];
-      output_values[output_index] = values[item];
+      const std::uint32_t input_index =
+          warp_major_tile_index<BlockSize, ItemsPerThread>(tile_base, item);
+      copy_value_array_item(output_values, output_index, input_values, input_index);
     }
   }
 }

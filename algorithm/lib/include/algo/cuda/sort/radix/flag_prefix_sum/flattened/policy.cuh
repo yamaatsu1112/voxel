@@ -3,18 +3,20 @@
 #include <algo/cuda/sort/common.cuh>
 #include <algo/cuda/sort/radix/common.cuh>
 #include <algo/cuda/sort/radix/flag_prefix_sum/flattened/kernels.cuh>
+#include <algo/cuda/sort/value_arrays.cuh>
 
 #include <limits>
 
 namespace algo::cuda::sort::detail {
 
-template <int BlockSize, int RadixBits, int KeyBits>
+template <int BlockSize, int RadixBits, int KeyBits, class Key>
 struct workspace_layout<RadixSort<FlagPrefixSumPass<FlattenedScan>, BlockSize,
-                                  RadixBits, KeyBits>> {
+                                  RadixBits, KeyBits>,
+                        Key> {
     static constexpr std::uint32_t kNumBuckets =
         static_cast<std::uint32_t>(1u << RadixBits);
 
-    std::uint32_t* temp_keys = nullptr;
+    Key* temp_keys = nullptr;
     std::uint32_t* flags = nullptr;
     void* scan_workspace = nullptr;
     std::size_t scan_workspace_size = 0;
@@ -30,8 +32,8 @@ struct workspace_layout<RadixSort<FlagPrefixSumPass<FlattenedScan>, BlockSize,
 
         std::size_t offset = 0;
 
-        offset = align_up<std::uint32_t>(offset);
-        offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+        offset = align_up<Key>(offset);
+        offset += sizeof(Key) * static_cast<std::size_t>(count);
 
         offset = align_up<std::uint32_t>(offset);
         offset += sizeof(std::uint32_t) * flags_count;
@@ -52,9 +54,9 @@ struct workspace_layout<RadixSort<FlagPrefixSumPass<FlattenedScan>, BlockSize,
 
         std::size_t offset = 0;
 
-        offset = align_up<std::uint32_t>(offset);
-        layout.temp_keys = pointer_at<std::uint32_t>(workspace, offset);
-        offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+        offset = align_up<Key>(offset);
+        layout.temp_keys = pointer_at<Key>(workspace, offset);
+        offset += sizeof(Key) * static_cast<std::size_t>(count);
 
         offset = align_up<std::uint32_t>(offset);
         layout.flags = pointer_at<std::uint32_t>(workspace, offset);
@@ -68,15 +70,17 @@ struct workspace_layout<RadixSort<FlagPrefixSumPass<FlattenedScan>, BlockSize,
     }
 };
 
-template <int BlockSize, int RadixBits, int KeyBits, class Value>
-struct pair_workspace_layout<
+template <int BlockSize, int RadixBits, int KeyBits, class Key,
+          class... Values>
+struct by_key_workspace_layout<
     RadixSort<FlagPrefixSumPass<FlattenedScan>, BlockSize, RadixBits, KeyBits>,
-    Value> {
+    Key,
+    value_arrays_t<Values...>> {
     static constexpr std::uint32_t kNumBuckets =
         static_cast<std::uint32_t>(1u << RadixBits);
 
-    std::uint32_t* temp_keys = nullptr;
-    Value* temp_values = nullptr;
+    Key* temp_keys = nullptr;
+    value_arrays_t<Values...> temp_values{};
     std::uint32_t* flags = nullptr;
     void* scan_workspace = nullptr;
     std::size_t scan_workspace_size = 0;
@@ -92,11 +96,10 @@ struct pair_workspace_layout<
 
         std::size_t offset = 0;
 
-        offset = align_up<std::uint32_t>(offset);
-        offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+        offset = align_up<Key>(offset);
+        offset += sizeof(Key) * static_cast<std::size_t>(count);
 
-        offset = align_up<Value>(offset);
-        offset += sizeof(Value) * static_cast<std::size_t>(count);
+        offset = add_value_array_temp_storage_size<Values...>(offset, count);
 
         offset = align_up<std::uint32_t>(offset);
         offset += sizeof(std::uint32_t) * flags_count;
@@ -107,8 +110,9 @@ struct pair_workspace_layout<
         return offset;
     }
 
-    static pair_workspace_layout create(void* workspace, std::uint32_t count) {
-        pair_workspace_layout layout{};
+    static by_key_workspace_layout create(void* workspace,
+                                          std::uint32_t count) {
+        by_key_workspace_layout layout{};
         const std::size_t flags_count =
             static_cast<std::size_t>(kNumBuckets) * count;
         const std::size_t scan_workspace_bytes =
@@ -117,13 +121,12 @@ struct pair_workspace_layout<
 
         std::size_t offset = 0;
 
-        offset = align_up<std::uint32_t>(offset);
-        layout.temp_keys = pointer_at<std::uint32_t>(workspace, offset);
-        offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+        offset = align_up<Key>(offset);
+        layout.temp_keys = pointer_at<Key>(workspace, offset);
+        offset += sizeof(Key) * static_cast<std::size_t>(count);
 
-        offset = align_up<Value>(offset);
-        layout.temp_values = pointer_at<Value>(workspace, offset);
-        offset += sizeof(Value) * static_cast<std::size_t>(count);
+        layout.temp_values =
+            allocate_temp_value_arrays<Values...>(workspace, offset, count);
 
         offset = align_up<std::uint32_t>(offset);
         layout.flags = pointer_at<std::uint32_t>(workspace, offset);
@@ -162,13 +165,15 @@ template <> struct scatter_impl<FlattenedScan> {
             output, input, layout.flags, count, shift, stream);
     }
 
-    template <class Key, class Value, int BlockSize, int RadixBits,
-              class Layout>
+    template <class Key, int BlockSize, int RadixBits, class Layout,
+              class... Values>
     static cudaError_t
-    run_pairs(Key* output_keys, Value* output_values, const Key* input_keys,
-              const Value* input_values, const Layout& layout,
-              std::uint32_t count, int shift, cudaStream_t stream) {
-        return scatter_pairs_flattened<Key, Value, BlockSize, RadixBits>(
+    run_by_key(Key* output_keys, value_arrays_t<Values...> output_values,
+               const Key* input_keys, value_arrays_t<Values...> input_values,
+               const Layout& layout, std::uint32_t count, int shift,
+               cudaStream_t stream) {
+        return scatter_by_key_flattened<Key, BlockSize, RadixBits,
+                                        Values...>(
             output_keys, output_values, input_keys, input_values, layout.flags,
             count, shift, stream);
     }

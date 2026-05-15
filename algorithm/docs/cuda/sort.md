@@ -1,7 +1,8 @@
 # CUDA Sort
 
-`algo::cuda::sort` provides in-place CUDA radix sort APIs for `std::uint32_t`
-keys. Key-only sorting and key-value pair sorting are supported.
+`algo::cuda::sort` provides in-place CUDA radix sort APIs for unsigned integer
+keys and fixed-width multi-word keys. Key-only sorting and sorting value arrays
+by key are supported.
 
 ```cpp
 #include <algo/cuda/sort.cuh>
@@ -13,15 +14,25 @@ keys. Key-only sorting and key-value pair sorting are supported.
 algo::cuda::sort::sort_keys<Config, Key>(
     d_keys, count, d_workspace, workspace_size, stream);
 
-algo::cuda::sort::sort_pairs<Config, Key, Value>(
-    d_keys, d_values, count, d_workspace, workspace_size, stream);
+algo::cuda::sort::sort_by_key<Config, Key>(
+    d_keys,
+    algo::cuda::sort::value_arrays(d_values0, d_values1),
+    count,
+    d_workspace,
+    workspace_size,
+    stream);
 
 algo::cuda::sort::required_workspace_size<Config, Key>(count);
-algo::cuda::sort::required_pairs_workspace_size<Config, Key, Value>(count);
+algo::cuda::sort::required_sort_by_key_workspace_size<
+    Config, Key, Value0, Value1>(count);
+algo::cuda::sort::required_sort_by_key_workspace_size<Key>(
+    count, algo::cuda::sort::value_arrays(d_values0, d_values1));
 ```
 
-All four APIs also have overloads without `Config`; those use the default
-configuration.
+`sort_keys`, `sort_by_key`, and `required_workspace_size` also have overloads
+without `Config`; those use the default configuration. For `sort_by_key`, the
+default workspace query takes the value-array payload object so the value types
+can be inferred.
 
 ## Default Configuration
 
@@ -31,7 +42,6 @@ The default is histogram radix sort:
 using DefaultConfig =
     algo::cuda::sort::RadixSort<
         algo::cuda::sort::HistogramPass<
-            algo::cuda::sort::FlattenedHistogram,
             algo::cuda::sort::SharedAtomicHistogram,
             algo::cuda::sort::WarpLevelMultiSplitWarpRank,
             4>,
@@ -45,7 +55,6 @@ This is equivalent to:
 using DefaultConfig =
     algo::cuda::sort::RadixSort<
         algo::cuda::sort::HistogramPass<
-            algo::cuda::sort::FlattenedHistogram,
             algo::cuda::sort::SharedAtomicHistogram,
             algo::cuda::sort::WarpLevelMultiSplitWarpRank,
             4>,
@@ -70,17 +79,17 @@ RadixSort<PassPolicy, BlockSize, RadixBits, KeyBits>
 | `RadixBits` | `4` | Bits processed per pass. Max is `8` for histogram sort and `5` for flag-prefix-sum sort. |
 | `KeyBits` | `32` | Number of low-order key bits to sort. |
 
-`RadixBits` must be positive and less than 32, `KeyBits` must be in `(0, 32]`,
-and `KeyBits % RadixBits == 0`.
+`RadixBits` must be positive and less than 32, `KeyBits` must be positive,
+must not exceed the selected key type's bit width, and
+`KeyBits % RadixBits == 0`.
 `OneSweepPass` currently supports `RadixBits <= 8`.
 
 Available pass policies:
 
 ```cpp
 algo::cuda::sort::HistogramPass<
-    HistogramLayoutPolicy,
     HistogramPolicy,
-    LocalRankPolicy,
+    WarpRankPolicy,
     ItemsPerThread>
 
 algo::cuda::sort::FlagPrefixSumPass<ScanPolicy>
@@ -92,22 +101,24 @@ algo::cuda::sort::OneSweepPass<
     ItemsPerThread>
 ```
 
-The default sort uses `HistogramPass<FlattenedHistogram,
-SharedAtomicHistogram, WarpLevelMultiSplitWarpRank, 4>` with a block size of `512`.
+The default sort uses
+`HistogramPass<SharedAtomicHistogram, WarpLevelMultiSplitWarpRank, 4>` with a
+block size of `512`.
 `FlagPrefixSumPass<>` uses `BucketWiseScan`; it can also be configured with
-`FlattenedScan`. OneSweep should specify `WarpLevelMultiSplitWarpRank` explicitly and uses
-`SharedAtomicGlobalOffsetsBlockHistogram` by default; global histogram
-accumulation is fixed to `atomicAdd`.
+`FlattenedScan`. `OneSweepPass` has no default template parameters; specify
+`WarpLevelMultiSplitWarpRank` and `SharedAtomicGlobalOffsetsBlockHistogram`
+explicitly. Its global histogram accumulation is fixed to `atomicAdd`.
 
 Implemented policies:
 
 | Role | Policies | Notes |
 | --- | --- | --- |
-| Pass policy | `HistogramPass<HistogramLayoutPolicy, HistogramPolicy, LocalRankPolicy, ItemsPerThread>` | Default pass policy. Builds block histograms, scans them, then scatters by local rank. |
+| Pass policy | `HistogramPass<HistogramPolicy, WarpRankPolicy, ItemsPerThread>` | Default pass policy. Builds block histograms, scans them, then scatters by local rank. |
 | Pass policy | `FlagPrefixSumPass<ScanPolicy>` | Alternate pass policy. Builds per-bucket flags, scans them, then scatters by scanned positions. |
 | Pass policy | `OneSweepPass<BlockHistogramPolicy, LocalRankPolicy, GlobalOffsetsBlockHistogramPolicy, ItemsPerThread>` | Builds global digit offsets up front, then uses per-bucket decoupled lookback during each partition pass. |
-| Histogram layout policy | `FlattenedHistogram` | Stores block histograms as `histograms[bucket * num_blocks + block]`. |
 | Histogram policy | `SharedAtomicHistogram` | Builds each block-local histogram in shared memory with atomics. |
+| Histogram policy | `WarpBallotHistogram` | Builds each block-local histogram from warp ballot bucket counts. |
+| Histogram policy | `WarpLevelMultiSplitHistogram` | Builds each block-local histogram while computing warp-level multi-split ranks. |
 | OneSweep block histogram policy | `WarpBallotBlockHistogram` | Builds each block-local histogram from warp ballot bucket counts while computing local ranks. |
 | OneSweep global offsets block histogram policy | `SharedAtomicGlobalOffsetsBlockHistogram` | Builds each block's all-pass digit histogram in shared memory; global accumulation after this local step is fixed to `atomicAdd`. |
 | Warp rank policy | `BucketBallotWarpRank` | Computes per-block bucket-local ranks using per-bucket warp ballots. |
@@ -118,7 +129,7 @@ Implemented policies:
 ## Workspace
 
 Always query workspace with the same `Config` that will be passed to
-`sort_keys` or `sort_pairs`; pass policies use different workspace layouts.
+`sort_keys` or `sort_by_key`; pass policies use different workspace layouts.
 
 ```cpp
 const std::size_t workspace_size =
@@ -127,33 +138,43 @@ const std::size_t workspace_size =
 
 ```cpp
 const std::size_t workspace_size =
-    algo::cuda::sort::required_pairs_workspace_size<
+    algo::cuda::sort::required_sort_by_key_workspace_size<
+        Config,
         std::uint32_t,
-        MyValue>(count);
+        std::uint32_t,
+        float>(count);
+```
+
+```cpp
+const auto values = algo::cuda::sort::value_arrays(d_ids, d_weights);
+const std::size_t workspace_size =
+    algo::cuda::sort::required_sort_by_key_workspace_size<std::uint32_t>(
+        count, values);
 ```
 
 For `count <= 1`, no workspace is required. If the workspace pointer is null or
-too small when workspace is required, `sort_keys` and `sort_pairs` return
+too small when workspace is required, `sort_keys` and `sort_by_key` return
 `cudaErrorInvalidValue`.
 
 Workspace shape by pass policy:
 
-| Policy | Key-only workspace | Pair sort addition |
+| Policy | Key-only workspace | Value sort addition |
 | --- | --- | --- |
-| `HistogramPass<FlattenedHistogram, ...>` | `temp_keys`, `histograms`, `scan_workspace` | `temp_values` |
-| `FlagPrefixSumPass<BucketWiseScan>` | `temp_keys`, `flags`, `bucket_offsets`, `scan_workspace` | `temp_values` |
-| `FlagPrefixSumPass<FlattenedScan>` | `temp_keys`, `flags`, `scan_workspace` | `temp_values` |
-| `OneSweepPass<...>` | `temp_keys`, `global_offsets`, `tile_counter`, `lookback_records` | `temp_values` |
+| `HistogramPass<...>` | `temp_keys`, `histograms`, `scan_workspace` | one `temp_values` buffer per value array |
+| `FlagPrefixSumPass<BucketWiseScan>` | `temp_keys`, `flags`, `bucket_offsets`, `scan_workspace` | one `temp_values` buffer per value array |
+| `FlagPrefixSumPass<FlattenedScan>` | `temp_keys`, `flags`, `scan_workspace` | one `temp_values` buffer per value array |
+| `OneSweepPass<...>` | `temp_keys`, `global_offsets`, `tile_counter`, `lookback_records` | one `temp_values` buffer per value array |
 
 ## Supported Types
 
 | API | Supported types |
 | --- | --- |
-| `sort_keys` | `Key` must be `std::uint32_t`. |
-| `sort_pairs` | `Key` must be `std::uint32_t`; `Value` must be trivially copyable. |
+| `sort_keys` | `Key` must be an unsigned integral type or `algo::cuda::sort::UIntKey<Words>`. |
+| `sort_by_key` | `Key` must be an unsigned integral type or `algo::cuda::sort::UIntKey<Words>`; every value array element type must be trivially copyable. |
 
-If `KeyBits < 32`, ordering is defined by the low-order `KeyBits` bits rather
-than by the full key value.
+`UIntKey<Words>` stores `Words` little-endian 32-bit words: `words[0]` is the
+least significant word. If `KeyBits` is less than the key width, ordering is
+defined by the low-order `KeyBits` bits rather than by the full key value.
 
 ## Examples
 
@@ -167,16 +188,23 @@ auto status = algo::cuda::sort::sort_keys<std::uint32_t>(
     d_keys, count, d_workspace, workspace_size, stream);
 ```
 
-Default key-value pair sort:
+Value arrays sorted by key:
 
 ```cpp
 const std::size_t workspace_size =
-    algo::cuda::sort::required_pairs_workspace_size<
+    algo::cuda::sort::required_sort_by_key_workspace_size<
+        Config,
         std::uint32_t,
-        MyValue>(count);
+        std::uint32_t,
+        float>(count);
 
-auto status = algo::cuda::sort::sort_pairs<std::uint32_t, MyValue>(
-    d_keys, d_values, count, d_workspace, workspace_size, stream);
+auto status = algo::cuda::sort::sort_by_key<Config>(
+    d_keys,
+    algo::cuda::sort::value_arrays(d_ids, d_weights),
+    count,
+    d_workspace,
+    workspace_size,
+    stream);
 ```
 
 Explicit flag-prefix-sum sort:
@@ -209,7 +237,6 @@ Sort only 16 low-order bits:
 ```cpp
 using Config = algo::cuda::sort::RadixSort<
     algo::cuda::sort::HistogramPass<
-        algo::cuda::sort::FlattenedHistogram,
         algo::cuda::sort::SharedAtomicHistogram,
         algo::cuda::sort::WarpLevelMultiSplitWarpRank,
         4>,
@@ -218,12 +245,29 @@ using Config = algo::cuda::sort::RadixSort<
     16>;
 ```
 
+Fixed-width 96-bit key sort:
+
+```cpp
+using Key = algo::cuda::sort::UIntKey<3>;
+using Config = algo::cuda::sort::RadixSort<
+    algo::cuda::sort::HistogramPass<
+        algo::cuda::sort::SharedAtomicHistogram,
+        algo::cuda::sort::WarpLevelMultiSplitWarpRank,
+        4>,
+    256,
+    4,
+    96>;
+
+auto status = algo::cuda::sort::sort_keys<Config, Key>(
+    d_keys, count, d_workspace, workspace_size, stream);
+```
+
 ## Selection Guide
 
 | Goal | Configuration to try |
 | --- | --- |
 | General use | Default histogram sort with `WarpLevelMultiSplitWarpRank`. |
-| Lower workspace for large inputs | `HistogramPass<FlattenedHistogram, SharedAtomicHistogram, WarpLevelMultiSplitWarpRank, ItemsPerThread>`. |
+| Lower workspace for large inputs | Tune `ItemsPerThread` in `HistogramPass<SharedAtomicHistogram, WarpLevelMultiSplitWarpRank, ItemsPerThread>`. |
 | Compare flag scan strategies | `FlagPrefixSumPass<BucketWiseScan>` vs. `FlagPrefixSumPass<FlattenedScan>`. |
 | Fewer passes | Increase `RadixBits` within the pass policy limit. |
 | Smaller key domain | Lower `KeyBits`. |

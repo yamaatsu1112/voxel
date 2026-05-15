@@ -5,9 +5,10 @@
 
 namespace algo::cuda::sort::detail {
 
-template <class Config> struct workspace_layout;
+template <class Config, class Key> struct workspace_layout;
 
-template <class Config, class Value> struct pair_workspace_layout;
+template <class Config, class Key, class Payload>
+struct by_key_workspace_layout;
 
 template <class ScanPolicy> struct flag_scan_impl;
 
@@ -23,9 +24,7 @@ template <class LocalRankPolicy> struct histogram_scatter_impl;
 
 template <int RadixBits, class Key>
 __device__ __forceinline__ std::uint32_t extract_digit(Key key, int shift) {
-    constexpr std::uint32_t kMask =
-        static_cast<std::uint32_t>((1u << RadixBits) - 1u);
-    return static_cast<std::uint32_t>((key >> shift) & kMask);
+    return radix_key_traits<Key>::template digit<RadixBits>(key, shift);
 }
 
 template <int BlockSize, int ItemsPerThread>

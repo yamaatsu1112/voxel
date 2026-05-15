@@ -1,13 +1,40 @@
 # CUDA SVT
 
 `algo::svt::cuda` provides CUDA-side sparse voxel tree storage, queries, and
-batched voxel edit operations. This document covers the policy configuration for
-the CUDA edit pipeline under `svt/cuda`.
-
-The public edit entry points are:
+batched edit operations. Include the aggregate header for the full CUDA SVO API:
 
 ```cpp
-#include <algo/svt/cuda/edit.cuh>
+#include <algo/svt/cuda.cuh>
+```
+
+The CUDA SVO world is fixed at `4096^3` voxels. Internal nodes have 8 children,
+and each leaf stores a `4^3` voxel payload as two 32-bit masks. `GpuSvo` owns the
+device allocations; kernels consume the non-owning `DeviceGpuSvo` returned by
+`GpuSvo::view()`.
+
+## Storage
+
+```cpp
+algo::svt::cuda::GpuSvo<> svo;
+auto status = svo.status();
+status = algo::svt::cuda::reset_svo(svo.view(), stream);
+```
+
+`GpuSvo<MaxNodeCount, MaxLeafCount>` allocates nodes, leaves, counters, and free
+lists. Construction only allocates memory; call `reset_svo` before using the
+tree. The defaults are:
+
+| Capacity | Default |
+| --- | --- |
+| `MaxNodeCount` | `131072` |
+| `MaxLeafCount` | `524288` |
+
+## Voxel Edits
+
+Voxel edit entry points accept absolute world coordinates:
+
+```cpp
+#include <algo/svt/cuda/voxel/edit.cuh>
 ```
 
 ```cpp
@@ -20,185 +47,129 @@ algo::svt::cuda::destroy_voxel_edits<Config>(
 algo::svt::cuda::apply_voxel_edits_workspace_size<Config>(count);
 ```
 
-Overloads without `Config` use the default edit configuration.
-`detail::apply_voxel_edits` is the shared internal implementation used by the
-place and destroy wrappers.
-
-## Default Configuration
+Overloads without `Config` use the default voxel edit configuration:
 
 ```cpp
 using DefaultEditConfig =
     algo::svt::cuda::EditConfig<
-        algo::svt::cuda::CompactAllDepthAllocation<algo::svt::cuda::Threadwise>,
-        algo::svt::cuda::HostLeafCountDispatch,
-        algo::svt::cuda::Fused,
-        algo::svt::cuda::Fused>;
+        algo::svt::cuda::CompactAllDepthAllocation<
+            algo::svt::cuda::Threadwise>,
+        algo::svt::cuda::HostLeafCountDispatch>;
 ```
 
-The default coalesces voxel edits into leaf masks with the fused builder,
-allocates missing paths with compact all-depth threadwise initialization,
-dispatches later kernels over the compacted leaf count copied to the host, and
-uses fused collapse.
+The edit pipeline always:
 
-## Configuration Model
+1. Coalesces raw voxel edits into one `LeafMask` per touched leaf.
+2. Allocates missing paths to every touched leaf.
+3. Applies place or destroy bits to leaf payloads.
+4. Collapses now-uniform subtrees.
 
-`EditConfig` has four top-level policy slots:
+`voxel_edits_to_leaf_masks` exposes the first stage separately for callers that
+want the compacted `LeafMask` representation without mutating the tree.
+
+## Voxel Edit Configuration
+
+`EditConfig` has two top-level policy slots:
 
 ```cpp
-EditConfig<Allocation, Dispatch, Collapse, BuildLeafMasks>
+EditConfig<Allocation, Dispatch>
 ```
 
 | Slot | Meaning |
 | --- | --- |
-| `Allocation` | Chooses how missing node and leaf paths are materialized before applying leaf bits. |
-| `Dispatch` | Chooses the capacity used when launching stages that consume compacted leaf masks. |
-| `Collapse` | Chooses how uniform or empty materialized children are freed after edits. |
-| `BuildLeafMasks` | Chooses how sorted voxel edits are reduced into one `LeafMask` per touched leaf. |
+| `Allocation` | Chooses how missing node and leaf paths are materialized. |
+| `Dispatch` | Chooses the launch capacity for stages that consume compacted leaf masks. |
 
-The edit pipeline always follows the same high-level order:
+Allocation policies:
 
-1. Convert voxel edits into compact leaf masks.
-2. Allocate missing paths to every touched leaf.
-3. Apply the requested place or destroy bits.
-4. Collapse now-uniform subtrees.
+| Policy | Notes |
+| --- | --- |
+| `ScanDepthwiseAllocation` | Records each leaf's missing path once, then emits needed requests depth by depth. |
+| `PlainDepthwiseAllocation` | Walks tree state at every depth, collecting and allocating unique requests for that depth. |
+| `CachedDepthwiseAllocation` | Carries current parent indices forward between depths to avoid repeated root-to-depth walks. |
+| `AllDepthAllocation` | Collects all materialization requests, initializes storage, links it, and commits counters from one allocation snapshot. |
+| `CompactAllDepthAllocation<InitMode, StartDepthMode, ScheduleMode>` | Stores compact per-leaf node and leaf counts instead of one request record per missing level. |
 
-Policies change the implementation strategy for these stages; they do not change
-the intended edit result.
+`CompactAllDepthAllocation` defaults to
+`CompactAllDepthAllocation<InitMode, RecoverStartDepth, LeafwiseMaterialize>`.
 
-## Top-Level Policies
-
-| Policy | Parameters | Valid slot | Notes |
-| --- | --- | --- | --- |
-| `EditConfig<Allocation, Dispatch, Collapse, BuildLeafMasks>` | `Allocation`, `Dispatch`, `Collapse`, `BuildLeafMasks` | top-level config | Selects all edit pipeline policies. |
-| `ScanDepthwiseAllocation<Mode>` | `Mode` | `Allocation` | Records the first missing depth for each touched leaf, then emits only the needed request for each depth. |
-| `PlainDepthwiseAllocation<Mode>` | `Mode` | `Allocation` | Walks one depth at a time, collecting and compacting allocation requests for that depth before moving deeper. |
-| `CachedDepthwiseAllocation` | none | `Allocation` | Depthwise allocation that carries each leaf's current parent index forward between depths. |
-| `AllDepthAllocation` | none | `Allocation` | Collects all missing node and leaf materialization requests, then initializes and links them from one allocation snapshot. |
-| `CompactAllDepthAllocation<InitMode, StartDepthMode>` | `InitMode`, `StartDepthMode = RecoverStartDepth` | `Allocation` | Stores compact per-leaf node and leaf counts instead of one request record per missing level. |
-| `VoxelCountDispatch` | none | `Dispatch` | Uses the original voxel edit count as the launch capacity for compacted leaf-mask consumers. |
-| `HostLeafCountDispatch` | none | `Dispatch` | Copies the compacted leaf count to the host and uses it as the launch capacity. |
-| `Fused` | none | `Collapse`, `BuildLeafMasks`, scan/plain allocation `Mode` | Uses fused scan post-processing where the selected stage supports it. |
-| `Unfused` | none | `Collapse`, `BuildLeafMasks`, scan/plain allocation `Mode` | Uses separate mark, scan, and compact/reduce kernels. |
-| `Threadwise` | none | compact allocation `InitMode` | Initializes each compact all-depth leaf path with one thread per touched leaf. |
-| `Childwise` | none | compact allocation `InitMode` | Initializes compact all-depth node child slots with one thread per child and several leaves per block. |
-| `RecoverStartDepth` | none | compact allocation `StartDepthMode` | Recovers start depth from scanned compact offsets. |
-| `StoreStartDepth` | none | compact allocation `StartDepthMode` | Stores start depth during count collection. |
-| `AtomicCas` | none | none in the current edit pipeline | Declared as a policy tag, but `svt/cuda` currently has no implementation specialization using it. |
-
-## Allocation Policies
-
-Allocation policies materialize any missing internal nodes and leaves needed for
-the touched leaf masks.
-
-| Policy | Parameters | Notes |
-| --- | --- | --- |
-| `ScanDepthwiseAllocation<Unfused>` | `Unfused` | Collects each leaf's missing-path state once. For each depth, marks needed emits, scans them, compacts requests, and allocates that depth. |
-| `ScanDepthwiseAllocation<Fused>` | `Fused` | Uses the same missing-path state as the unfused variant, but combines per-depth emit marking and request compaction into fused scan callbacks. This is the default allocation policy. |
-| `PlainDepthwiseAllocation<Unfused>` | `Unfused` | At every depth, walks the current tree state from the touched leaves, marks unique parent/child requests, scans offsets, compacts requests, and allocates the batch. |
-| `PlainDepthwiseAllocation<Fused>` | `Fused` | Same depthwise request model as `PlainDepthwiseAllocation<Unfused>`, but fuses unique-request marking and compaction with the scan stage. |
-| `CachedDepthwiseAllocation` | none | Initializes per-leaf parent indices once and advances them after each depth, avoiding repeated root-to-depth walks for later levels. |
-| `AllDepthAllocation` | none | Computes all materialization flags across all depths, scans them once, initializes materialized storage, links it, and commits node and leaf counters. |
-| `CompactAllDepthAllocation<Threadwise, RecoverStartDepth>` | `InitMode = Threadwise`, `StartDepthMode = RecoverStartDepth` | Counts materialized nodes and leaves per touched leaf, scans compact offsets, recovers start depth from scanned offsets during initialization, and initializes each leaf path from a single thread. |
-| `CompactAllDepthAllocation<Childwise, RecoverStartDepth>` | `InitMode = Childwise`, `StartDepthMode = RecoverStartDepth` | Uses the same compact count representation and recovered start depth, but spreads node child-slot initialization across child threads. |
-| `CompactAllDepthAllocation<Threadwise, StoreStartDepth>` | `InitMode = Threadwise`, `StartDepthMode = StoreStartDepth` | Stores each leaf's start depth while collecting counts, then initializes each leaf path from a single thread. |
-| `CompactAllDepthAllocation<Childwise, StoreStartDepth>` | `InitMode = Childwise`, `StartDepthMode = StoreStartDepth` | Uses stored start depths and child-parallel node initialization. |
-
-`CompactAllDepthAllocation<InitMode>` defaults `StartDepthMode` to
-`RecoverStartDepth`.
-
-## Allocation Mode Policies
-
-`Fused` and `Unfused` appear as the `Mode` parameter for scan-depthwise and
-plain-depthwise allocation.
+Compact allocation sub-policies:
 
 | Policy | Meaning |
 | --- | --- |
-| `Fused` | Combines simple transform or compaction work into scan post-processing callbacks, reducing the number of standalone kernels and intermediate arrays for that stage. |
-| `Unfused` | Keeps mark, scan, compact, reduce, or initialize work in separate kernels. This is usually easier to inspect and can be useful as a comparison point. |
+| `Threadwise` | Initializes each compact path from one thread per touched leaf. |
+| `Childwise` | Spreads node child-slot initialization across child threads. |
+| `RecoverStartDepth` | Recovers the first missing depth from scanned compact offsets. |
+| `StoreStartDepth` | Stores the first missing depth during count collection. |
+| `LeafwiseMaterialize` | Materializes one compact path per touched leaf. |
+| `Nodewise<OffsetSearch>` | Materializes node-wise requests by deriving node offsets from compact ranges. |
+| `Nodewise<ExplicitRequests>` | Materializes node-wise requests from explicit request records. |
 
-The exact fused work depends on the allocation family. For example,
-`ScanDepthwiseAllocation<Fused>` fuses per-depth request emission with scan.
-
-## Compact Initialization Policies
-
-`CompactAllDepthAllocation` has an `InitMode` parameter that controls how newly
-materialized compact paths are initialized.
-
-| Policy | Meaning |
-| --- | --- |
-| `Threadwise` | Launches one-dimensional blocks and initializes all nodes and the leaf for one touched leaf from a single thread. |
-| `Childwise` | Launches blocks shaped as `kGroupSize` children by a fixed number of leaves. Each child thread initializes the corresponding child slot for the materialized nodes, while child `0` also initializes the leaf payload. |
-
-## Compact Start-Depth Policies
-
-`CompactAllDepthAllocation` has a second parameter that controls how the start
-depth for each touched leaf is made available after the per-leaf counts have
-been scanned.
+Dispatch policies:
 
 | Policy | Meaning |
 | --- | --- |
-| `RecoverStartDepth` | Does not store start depth directly. It recovers it from the scanned node and leaf offsets. This keeps the compact representation smaller. |
-| `StoreStartDepth` | Stores start depth during the count collection pass and reuses that value later. This avoids recovering the depth from scanned offsets. |
+| `VoxelCountDispatch` | Uses the original voxel edit count as launch capacity. This avoids a host synchronization. |
+| `HostLeafCountDispatch` | Copies the compacted leaf count to the host and launches later stages over the exact leaf count. |
 
-## Dispatch Policies
+## Terminal Edits
 
-The build-leaf-mask stage writes a device-side `leaf_count`. Later stages also
-need a launch capacity for arrays sized by the original edit count. Dispatch
-policies choose that capacity.
+Terminal edits operate on already-coalesced terminal node and leaf inputs:
 
-| Policy | Meaning |
+```cpp
+#include <algo/svt/cuda/terminal/edit.cuh>
+```
+
+```cpp
+algo::svt::cuda::place_terminal_edits<Config>(
+    svo, nodes, node_count, leaves, leaf_count, workspace, workspace_size,
+    stream);
+
+algo::svt::cuda::destroy_terminal_edits<Config>(
+    svo, nodes, node_count, leaves, leaf_count, workspace, workspace_size,
+    stream);
+```
+
+The default terminal edit configuration is:
+
+```cpp
+using DefaultTerminalEditConfig =
+    algo::svt::cuda::TerminalEditConfig<
+        algo::svt::cuda::TerminalCompactAllDepthAllocation,
+        algo::svt::cuda::TerminalFrontierRelease>;
+```
+
+Terminal edit policy slots:
+
+| Slot | Policies |
 | --- | --- |
-| `VoxelCountDispatch` | Uses the original voxel edit count. This avoids a device-to-host copy and is safe because the number of touched leaves cannot exceed the number of input edits. |
-| `HostLeafCountDispatch` | Copies `leaf_count` from device to host, synchronizes the stream, and dispatches over the exact compacted leaf count. This can reduce later kernel work when many edits collapse into fewer leaves, but adds a host synchronization point. |
+| `Allocation` | `TerminalPlainDepthwiseAllocation`, `TerminalCompactAllDepthAllocation` |
+| `Release` | `TerminalDepthwiseRelease`, `TerminalFrontierRelease` |
 
-## Collapse Policies
+Workspace sizing for terminal edits is currently exposed through the detail
+helper used by tests and benchmarks:
 
-Collapse runs from the maximum depth back toward the root after leaf bits have
-been applied. It frees materialized children whose region can be represented by
-the parent slot alone.
+```cpp
+const auto workspace_size =
+    algo::svt::cuda::detail::apply_terminal_edits_workspace_size<
+        Config::allocation,
+        Config::release>(node_count, leaf_count, request_capacity);
+```
 
-| Policy | Meaning |
-| --- | --- |
-| `Fused` | Collects free-request keys and compacts unique requests through fused scan callbacks before freeing the batch for each depth. |
-| `Unfused` | Collects free-request keys, marks unique offsets, scans them, compacts unique requests, then frees the batch for each depth. |
-
-Both policies use the same leaf masks and walk depths from `kMaxDepth` down to
-`1`.
-
-## Build-Leaf-Mask Policies
-
-Before allocation, raw voxel edits are packed into sortable `(leaf_key,
-leaf-local bit)` records and sorted. The build-leaf-mask policy reduces each run
-of equal leaf keys into one `LeafMask`.
-
-| Policy | Meaning |
-| --- | --- |
-| `Fused` | Uses fused scan callbacks to identify run starts, emit leaf masks, and write the final leaf count. |
-| `Unfused` | Marks leaf-key run starts, scans run offsets, then reduces each run in a separate kernel. |
-
-Invalid voxel coordinates are packed with `kInvalidSortKey` and dropped by both
-builders.
+Choose `request_capacity` large enough for the emitted terminal requests. The
+request count depends on the covered terminal boxes after world-offset clipping;
+tests and benchmarks size this explicitly from the input shape they generate.
 
 ## Examples
 
-Default-equivalent configuration:
+Default voxel edit:
 
 ```cpp
-using Config = algo::svt::cuda::EditConfig<
-    algo::svt::cuda::ScanDepthwiseAllocation<algo::svt::cuda::Fused>,
-    algo::svt::cuda::VoxelCountDispatch,
-    algo::svt::cuda::Fused,
-    algo::svt::cuda::Fused>;
-```
+const auto workspace_size =
+    algo::svt::cuda::apply_voxel_edits_workspace_size(count);
 
-Exact leaf-count dispatch with unfused collapse:
-
-```cpp
-using Config = algo::svt::cuda::EditConfig<
-    algo::svt::cuda::ScanDepthwiseAllocation<algo::svt::cuda::Fused>,
-    algo::svt::cuda::HostLeafCountDispatch,
-    algo::svt::cuda::Unfused,
-    algo::svt::cuda::Fused>;
+auto status = algo::svt::cuda::place_voxel_edits(
+    svo.view(), d_edits, count, d_workspace, workspace_size, stream);
 ```
 
 Compact all-depth allocation that stores start depth:
@@ -208,17 +179,24 @@ using Config = algo::svt::cuda::EditConfig<
     algo::svt::cuda::CompactAllDepthAllocation<
         algo::svt::cuda::Threadwise,
         algo::svt::cuda::StoreStartDepth>,
-    algo::svt::cuda::VoxelCountDispatch,
-    algo::svt::cuda::Fused,
-    algo::svt::cuda::Fused>;
+    algo::svt::cuda::VoxelCountDispatch>;
 ```
 
-Unfused pipeline for comparison or debugging:
+Node-wise compact allocation:
 
 ```cpp
 using Config = algo::svt::cuda::EditConfig<
-    algo::svt::cuda::PlainDepthwiseAllocation<algo::svt::cuda::Unfused>,
-    algo::svt::cuda::VoxelCountDispatch,
-    algo::svt::cuda::Unfused,
-    algo::svt::cuda::Unfused>;
+    algo::svt::cuda::CompactAllDepthAllocation<
+        algo::svt::cuda::Childwise,
+        algo::svt::cuda::RecoverStartDepth,
+        algo::svt::cuda::Nodewise<algo::svt::cuda::OffsetSearch>>,
+    algo::svt::cuda::HostLeafCountDispatch>;
+```
+
+Terminal edit with depthwise release:
+
+```cpp
+using Config = algo::svt::cuda::TerminalEditConfig<
+    algo::svt::cuda::TerminalCompactAllDepthAllocation,
+    algo::svt::cuda::TerminalDepthwiseRelease>;
 ```

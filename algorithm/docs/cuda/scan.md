@@ -21,6 +21,9 @@ algo::cuda::scan::required_workspace_size<Config, T>(count);
 ```
 
 Overloads without `Config` use the default configuration.
+Generic `inclusive_scan`, `exclusive_scan`, and `required_workspace_size`
+overloads also take an operation type. `inclusive_sum` and `exclusive_sum` are
+wrappers that use `Plus<T>`.
 
 ## Default Configuration
 
@@ -28,12 +31,11 @@ Overloads without `Config` use the default configuration.
 using DefaultConfig =
     algo::cuda::scan::BlockBased<
         algo::cuda::scan::DecoupledLookback<
-            algo::cuda::scan::WarpShuffleBlock<>>>;
+            algo::cuda::scan::WarpShuffleBlock<512, 4>>>;
 ```
 
 The default uses a block-based decoupled lookback scan with a warp-shuffle block
-scan. `WarpShuffleBlock<>` defaults to `WarpShuffleBlock<256, 4>`, so the
-default tile size is `256 * 4` items.
+scan. The default tile size is `512 * 4` items.
 
 ## Configuration Model
 
@@ -170,8 +172,17 @@ If the workspace pointer is null or too small when workspace is required,
 
 `T` must be an integral or floating-point type.
 
-The scan operation is addition with `T{0}` as the identity. Floating-point
-results may differ across configurations because the reduction order can differ.
+`inclusive_sum` and `exclusive_sum` use addition with `T{0}` as the identity.
+The generic scan entry points accept an operation type with `operator()` and a
+static `identity()` member. The built-in operation policies are:
+
+| Policy | Supported types | Identity |
+| --- | --- | --- |
+| `Plus<T>` | integral and floating-point `T` | `T{0}` |
+| `Max<T>` | integral `T` | `0` for unsigned types, minimum signed value for signed types |
+
+Floating-point results may differ across configurations because the reduction
+order can differ.
 
 ## Examples
 
@@ -198,7 +209,7 @@ Explicit default-equivalent decoupled lookback configuration:
 ```cpp
 using Config = algo::cuda::scan::BlockBased<
     algo::cuda::scan::DecoupledLookback<
-        algo::cuda::scan::WarpShuffleBlock<>>>;
+        algo::cuda::scan::WarpShuffleBlock<512, 4>>>;
 ```
 
 Blelloch block scan with padded shared memory:
@@ -236,6 +247,14 @@ Global Blelloch scan:
 ```cpp
 using Config = algo::cuda::scan::Global<
     algo::cuda::scan::BlellochGlobal<256>>;
+```
+
+Generic max scan:
+
+```cpp
+auto status = algo::cuda::scan::exclusive_scan<
+    algo::cuda::scan::Max<std::uint32_t>>(
+    d_data, count, d_workspace, workspace_size, stream);
 ```
 
 ## Selection Guide

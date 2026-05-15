@@ -393,9 +393,9 @@ cudaError_t prepare_terminal_requests(
     auto count_sort_workspace = cuda_detail::create_terminal_count_sort_workspace(
         workspace.phase_scratch, node_count * 2u + leaf_count,
         workspace.request_capacity);
-    status = algo::cuda::sort::sort_pairs(
-        workspace.request_keys, workspace.requests, request_count,
-        count_sort_workspace.sort_workspace,
+    status = algo::cuda::sort::sort_by_key(
+        workspace.request_keys, algo::cuda::sort::value_arrays(workspace.requests),
+        request_count, count_sort_workspace.sort_workspace,
         count_sort_workspace.sort_workspace_size, nullptr);
     if (status != cudaSuccess)
         return status;
@@ -667,8 +667,9 @@ void BM_CudaSvtTerminalPhase(benchmark::State& state, TerminalPhase phase,
                             typed_workspace.phase_scratch,
                             node_count * 2u + leaf_count,
                             typed_workspace.request_capacity);
-                status = algo::cuda::sort::sort_pairs(
-                    typed_workspace.request_keys, typed_workspace.requests,
+                status = algo::cuda::sort::sort_by_key(
+                    typed_workspace.request_keys,
+                    algo::cuda::sort::value_arrays(typed_workspace.requests),
                     request_count, count_sort_workspace.sort_workspace,
                     count_sort_workspace.sort_workspace_size, nullptr);
             }

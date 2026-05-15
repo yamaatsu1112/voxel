@@ -2,6 +2,7 @@
 
 #include <algo/cuda/sort/radix/onesweep/global_offsets.cuh>
 #include <algo/cuda/sort/radix/onesweep/partition.cuh>
+#include <algo/cuda/sort/value_arrays.cuh>
 
 #include <cstddef>
 #include <type_traits>
@@ -20,7 +21,6 @@ struct sort_impl<
                 "OneSweepPass currently requires RadixBits <= 8");
   static_assert(RadixBits < 32, "RadixSort requires RadixBits < 32");
   static_assert(KeyBits > 0, "RadixSort requires KeyBits > 0");
-  static_assert(KeyBits <= 32, "RadixSort currently requires KeyBits <= 32");
   static_assert(KeyBits % RadixBits == 0,
                 "RadixSort requires KeyBits to be a multiple of RadixBits");
   static_assert(BlockSize % 32 == 0,
@@ -31,9 +31,11 @@ struct sort_impl<
       RadixSort<OneSweepPass<BlockHistogramPolicy, LocalRankPolicy,
                              GlobalOffsetsBlockHistogramPolicy, ItemsPerThread>,
                 BlockSize, RadixBits, KeyBits>;
-  using layout_type = workspace_layout<config_type>;
-  template <class Value>
-  using pair_layout_type = pair_workspace_layout<config_type, Value>;
+  template <class Key>
+  using layout_type = workspace_layout<config_type, Key>;
+  template <class Key, class... Values>
+  using by_key_layout_type =
+      by_key_workspace_layout<config_type, Key, value_arrays_t<Values...>>;
 
   static constexpr std::uint32_t kNumBuckets =
       static_cast<std::uint32_t>(1u << RadixBits);
@@ -51,36 +53,39 @@ struct sort_impl<
 
   template <class Key>
   static std::size_t required_workspace_size(std::uint32_t count) {
-    static_assert(std::is_same_v<Key, std::uint32_t>,
-                  "OneSweepPass currently only supports uint32_t");
-    static_assert(KeyBits <= static_cast<int>(sizeof(Key) * 8u),
+    static_assert(radix_key_traits<Key>::kSupported,
+                  "OneSweepPass key type is not supported");
+    static_assert(KeyBits <= radix_key_traits<Key>::kBits,
                   "RadixSort KeyBits exceeds the key type width");
-    return layout_type::required_workspace_size(count);
+    return layout_type<Key>::required_workspace_size(count);
   }
 
-  template <class Key, class Value>
-  static std::size_t required_pairs_workspace_size(std::uint32_t count) {
-    static_assert(std::is_same_v<Key, std::uint32_t>,
-                  "OneSweepPass currently only supports uint32_t");
-    static_assert(KeyBits <= static_cast<int>(sizeof(Key) * 8u),
+  template <class Key, class... Values>
+  static std::size_t
+  required_sort_by_key_workspace_size(std::uint32_t count) {
+    static_assert(radix_key_traits<Key>::kSupported,
+                  "OneSweepPass key type is not supported");
+    static_assert(KeyBits <= radix_key_traits<Key>::kBits,
                   "RadixSort KeyBits exceeds the key type width");
-    static_assert(std::is_trivially_copyable_v<Value>,
-                  "sort_pairs requires trivially copyable values");
-    return pair_layout_type<Value>::required_workspace_size(count);
+    static_assert(kSupportedValueArrayTypes<Values...>,
+                  "sort_by_key requires trivially copyable values");
+    return by_key_layout_type<Key, Values...>::required_workspace_size(count);
   }
 
   template <class Key>
   static cudaError_t sort_keys(Key *d_keys, std::uint32_t count,
                                void *workspace, std::size_t,
                                cudaStream_t stream) {
-    static_assert(std::is_same_v<Key, std::uint32_t>,
-                  "OneSweepPass currently only supports uint32_t");
+    static_assert(radix_key_traits<Key>::kSupported,
+                  "OneSweepPass key type is not supported");
+    static_assert(KeyBits <= radix_key_traits<Key>::kBits,
+                  "RadixSort KeyBits exceeds the key type width");
     if (count <= 1)
       return cudaSuccess;
     if (count > kOneSweepLookbackValueMask)
       return cudaErrorInvalidValue;
 
-    auto layout = layout_type::create(workspace, count);
+    auto layout = layout_type<Key>::create(workspace, count);
     cudaError_t status =
         build_onesweep_global_offsets<Key, BlockSize, RadixBits, KeyBits>(
             layout.global_offsets, d_keys, count, stream,
@@ -127,20 +132,22 @@ struct sort_impl<
     return cudaSuccess;
   }
 
-  template <class Key, class Value>
-  static cudaError_t sort_pairs(Key *d_keys, Value *d_values,
-                                std::uint32_t count, void *workspace,
-                                std::size_t, cudaStream_t stream) {
-    static_assert(std::is_same_v<Key, std::uint32_t>,
-                  "OneSweepPass currently only supports uint32_t");
-    static_assert(std::is_trivially_copyable_v<Value>,
-                  "sort_pairs requires trivially copyable values");
+  template <class Key, class... Values>
+  static cudaError_t sort_by_key(Key *d_keys, value_arrays_t<Values...> d_values,
+                                 std::uint32_t count, void *workspace,
+                                 std::size_t, cudaStream_t stream) {
+    static_assert(radix_key_traits<Key>::kSupported,
+                  "OneSweepPass key type is not supported");
+    static_assert(KeyBits <= radix_key_traits<Key>::kBits,
+                  "RadixSort KeyBits exceeds the key type width");
+    static_assert(kSupportedValueArrayTypes<Values...>,
+                  "sort_by_key requires trivially copyable values");
     if (count <= 1)
       return cudaSuccess;
     if (count > kOneSweepLookbackValueMask)
       return cudaErrorInvalidValue;
 
-    auto layout = pair_layout_type<Value>::create(workspace, count);
+    auto layout = by_key_layout_type<Key, Values...>::create(workspace, count);
     cudaError_t status =
         build_onesweep_global_offsets<Key, BlockSize, RadixBits, KeyBits>(
             layout.global_offsets, d_keys, count, stream,
@@ -150,8 +157,8 @@ struct sort_impl<
 
     Key *input_keys = d_keys;
     Key *output_keys = layout.temp_keys;
-    Value *input_values = d_values;
-    Value *output_values = layout.temp_values;
+    auto input_values = d_values;
+    auto output_values = layout.temp_values;
     const std::size_t lookback_bytes =
         sizeof(onesweep_lookback_record) *
         static_cast<std::size_t>(kNumBuckets) * layout.num_blocks;
@@ -168,8 +175,8 @@ struct sort_impl<
       const int shift =
           static_cast<int>(pass * static_cast<std::uint32_t>(RadixBits));
       const auto grid = static_cast<unsigned int>(layout.num_blocks);
-      onesweep_partition_pairs_kernel<BlockSize, RadixBits, ItemsPerThread,
-                                      BlockHistogramPolicy, LocalRankPolicy>
+      onesweep_partition_by_key_kernel<BlockSize, RadixBits, ItemsPerThread,
+                                       BlockHistogramPolicy, LocalRankPolicy>
           <<<grid, BlockSize, 0, stream>>>(
               output_keys, output_values, input_keys, input_values,
               layout.global_offsets + pass * kNumBuckets,
@@ -182,9 +189,7 @@ struct sort_impl<
       output_keys = input_keys;
       input_keys = previous_key_output;
 
-      Value *const previous_value_output = output_values;
-      output_values = input_values;
-      input_values = previous_value_output;
+      swap_value_arrays(output_values, input_values);
     }
 
     if (input_keys != d_keys) {
@@ -192,8 +197,8 @@ struct sort_impl<
                                                          count, stream);
       if (status != cudaSuccess)
         return status;
-      return ::algo::cuda::copy_buffer<Value, BlockSize>(d_values, input_values,
-                                                         count, stream);
+      return copy_value_array_buffers<BlockSize>(d_values, input_values, count,
+                                         stream);
     }
     return cudaSuccess;
   }

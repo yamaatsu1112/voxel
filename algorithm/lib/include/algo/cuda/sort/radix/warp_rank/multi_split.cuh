@@ -1,11 +1,12 @@
 #pragma once
 
 #include <algo/cuda/sort/radix/common.cuh>
+#include <algo/cuda/sort/radix/warp_rank/count_update.cuh>
 
 namespace algo::cuda::sort::detail {
 
 template <> struct warp_rank_impl<WarpLevelMultiSplitWarpRank> {
-    template <int BlockSize, int RadixBits>
+    template <class CountUpdater, int BlockSize, int RadixBits>
     __device__ static std::uint32_t compute(std::uint32_t* warp_counts,
                                             std::uint32_t digit, bool valid) {
         static_assert(
@@ -34,8 +35,11 @@ template <> struct warp_rank_impl<WarpLevelMultiSplitWarpRank> {
 
         const int leader_lane = __ffs(digit_mask) - 1;
         if (lane == leader_lane) {
-            warp_counts[static_cast<std::size_t>(warp) * kNumBuckets + digit] =
-                static_cast<std::uint32_t>(__popc(digit_mask));
+            const std::size_t index =
+                static_cast<std::size_t>(warp) * kNumBuckets + digit;
+            CountUpdater::update(
+                warp_counts, index,
+                static_cast<std::uint32_t>(__popc(digit_mask)));
         }
 
         const unsigned int lower_lanes = lane == 0 ? 0u : ((1u << lane) - 1u);

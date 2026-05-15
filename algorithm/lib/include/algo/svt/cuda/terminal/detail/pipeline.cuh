@@ -107,8 +107,9 @@ apply_terminal_edits(DeviceGpuSvo svo, const TerminalNodeInput *nodes,
   if (status != cudaSuccess)
     return status;
 
-  status = algo::cuda::sort::sort_pairs(
-      typed_workspace.request_keys, typed_workspace.requests, request_count,
+  status = algo::cuda::sort::sort_by_key(
+      typed_workspace.request_keys,
+      algo::cuda::sort::value_arrays(typed_workspace.requests), request_count,
       count_sort_workspace.sort_workspace,
       count_sort_workspace.sort_workspace_size, stream);
   if (status != cudaSuccess)

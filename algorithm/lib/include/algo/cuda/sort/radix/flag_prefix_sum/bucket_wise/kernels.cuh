@@ -2,6 +2,7 @@
 
 #include <algo/cuda/sort/common.cuh>
 #include <algo/cuda/sort/radix/common.cuh>
+#include <algo/cuda/sort/value_arrays.cuh>
 
 namespace algo::cuda::sort::detail {
 
@@ -79,13 +80,14 @@ cudaError_t scatter_keys(Key* output, const Key* input,
     return cudaGetLastError();
 }
 
-template <int RadixBits, class Key, class Value>
-__global__ void scatter_pairs_kernel(Key* output_keys, Value* output_values,
-                                     const Key* input_keys,
-                                     const Value* input_values,
-                                     const std::uint32_t* scanned_flags,
-                                     const std::uint32_t* bucket_offsets,
-                                     std::uint32_t count, int shift) {
+template <int RadixBits, class Key, class... Values>
+__global__ void scatter_by_key_kernel(Key* output_keys,
+                                      value_arrays_t<Values...> output_values,
+                                      const Key* input_keys,
+                                      value_arrays_t<Values...> input_values,
+                                      const std::uint32_t* scanned_flags,
+                                      const std::uint32_t* bucket_offsets,
+                                      std::uint32_t count, int shift) {
     const std::uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index >= count)
         return;
@@ -96,20 +98,23 @@ __global__ void scatter_pairs_kernel(Key* output_keys, Value* output_values,
         scanned_flags[static_cast<std::size_t>(digit) * count + index];
     const std::uint32_t output_index = bucket_offsets[digit] + local_offset;
     output_keys[output_index] = input_keys[index];
-    output_values[output_index] = input_values[index];
+    copy_value_array_item(output_values, output_index, input_values, index);
 }
 
-template <class Key, class Value, int BlockSize, int RadixBits>
-cudaError_t scatter_pairs(Key* output_keys, Value* output_values,
-                          const Key* input_keys, const Value* input_values,
-                          const std::uint32_t* scanned_flags,
-                          const std::uint32_t* bucket_offsets,
-                          std::uint32_t count, int shift, cudaStream_t stream) {
+template <class Key, int BlockSize, int RadixBits, class... Values>
+cudaError_t scatter_by_key(Key* output_keys,
+                           value_arrays_t<Values...> output_values,
+                           const Key* input_keys,
+                           value_arrays_t<Values...> input_values,
+                           const std::uint32_t* scanned_flags,
+                           const std::uint32_t* bucket_offsets,
+                           std::uint32_t count, int shift,
+                           cudaStream_t stream) {
     if (count == 0)
         return cudaSuccess;
     const auto grid =
         static_cast<unsigned int>(::algo::ceil_div(count, BlockSize));
-    scatter_pairs_kernel<RadixBits><<<grid, BlockSize, 0, stream>>>(
+    scatter_by_key_kernel<RadixBits><<<grid, BlockSize, 0, stream>>>(
         output_keys, output_values, input_keys, input_values, scanned_flags,
         bucket_offsets, count, shift);
     return cudaGetLastError();

@@ -35,8 +35,8 @@ __global__ void update_leaf_values_kernel(DeviceGpuSvo svo,
         node_index = node_child_index(node, child_index);
     }
 
-    atomicOr(&svo.leaves[node_index].voxel_data_low, mask.voxel_data_low);
-    atomicOr(&svo.leaves[node_index].voxel_data_high, mask.voxel_data_high);
+    svo.leaves[node_index].voxel_data_low |= mask.voxel_data_low;
+    svo.leaves[node_index].voxel_data_high |= mask.voxel_data_high;
 }
 
 // Clear payload bits for materialized leaves. Topology cleanup is deferred to
@@ -60,8 +60,8 @@ __global__ void clear_leaf_values_kernel(DeviceGpuSvo svo,
         node_index = node_child_index(node, child_index);
     }
 
-    atomicAnd(&svo.leaves[node_index].voxel_data_low, ~mask.voxel_data_low);
-    atomicAnd(&svo.leaves[node_index].voxel_data_high, ~mask.voxel_data_high);
+    svo.leaves[node_index].voxel_data_low &= ~mask.voxel_data_low;
+    svo.leaves[node_index].voxel_data_high &= ~mask.voxel_data_high;
 }
 
 inline cudaError_t apply_leaf_masks(DeviceGpuSvo svo, const LeafMask* leaf_masks,

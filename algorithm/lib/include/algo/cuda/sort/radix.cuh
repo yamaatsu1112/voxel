@@ -1,10 +1,10 @@
 #pragma once
 
 #include <algo/cuda/scan/scan.cuh>
+#include <algo/cuda/sort/uint_key.cuh>
 
 #include <cstddef>
 #include <cstdint>
-#include <type_traits>
 
 #ifndef __CUDACC__
 #error "algo::cuda::sort::radix requires CUDA compilation with nvcc"
@@ -60,7 +60,6 @@ struct RadixSort {
     static_assert(RadixBits > 0, "RadixSort requires RadixBits > 0");
     static_assert(RadixBits < 32, "RadixSort requires RadixBits < 32");
     static_assert(KeyBits > 0, "RadixSort requires KeyBits > 0");
-    static_assert(KeyBits <= 32, "RadixSort currently requires KeyBits <= 32");
     static_assert(KeyBits % RadixBits == 0,
                   "RadixSort requires KeyBits to be a multiple of RadixBits");
     static constexpr int kBlockSize = BlockSize;

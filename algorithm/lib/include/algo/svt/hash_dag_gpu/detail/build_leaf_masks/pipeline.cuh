@@ -91,9 +91,9 @@ inline cudaError_t build_leaf_masks(const VoxelEdit *edits, std::uint32_t count,
   if (status != cudaSuccess)
     return status;
 
-  status = algo::cuda::sort::sort_pairs(workspace.keys, workspace.voxel_bits,
-                                        count, workspace.sort_workspace,
-                                        workspace.sort_workspace_size, stream);
+  status = algo::cuda::sort::sort_by_key(
+      workspace.keys, algo::cuda::sort::value_arrays(workspace.voxel_bits), count,
+      workspace.sort_workspace, workspace.sort_workspace_size, stream);
   if (status != cudaSuccess)
     return status;
 

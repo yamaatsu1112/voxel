@@ -42,13 +42,6 @@ template <class WarpRankPolicy> struct histogram_local_rank_impl {
         const std::uint32_t warp =
             static_cast<std::uint32_t>(threadIdx.x / kWarpSize);
         for (int item = 0; item < ItemsPerThread; ++item) {
-            for (std::uint32_t index = threadIdx.x;
-                 index < static_cast<std::uint32_t>(kWarpCount) * kNumBuckets;
-                 index += blockDim.x) {
-                warp_bucket_scratch[index] = 0;
-            }
-            __syncthreads();
-
             const std::uint32_t digit = digits[item];
             item_prefix_in_warp[item] =
                 warp_counts[static_cast<std::size_t>(warp) * kNumBuckets +
@@ -56,15 +49,8 @@ template <class WarpRankPolicy> struct histogram_local_rank_impl {
 
             ranks[item] =
                 warp_rank_impl<WarpRankPolicy>::template compute<
-                    BlockSize, RadixBits>(warp_bucket_scratch, digit,
-                                          valid_items[item]);
-            __syncthreads();
-
-            for (std::uint32_t index = threadIdx.x;
-                 index < static_cast<std::uint32_t>(kWarpCount) * kNumBuckets;
-                 index += blockDim.x) {
-                warp_counts[index] += warp_bucket_scratch[index];
-            }
+                    warp_rank_count_add, BlockSize, RadixBits>(
+                    warp_counts, digit, valid_items[item]);
             __syncthreads();
         }
 

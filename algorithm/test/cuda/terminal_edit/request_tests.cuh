@@ -59,8 +59,9 @@ TEST(CudaTerminalEditRequests, PruneDropsCoveredBricksBeforeMergingMasks) {
         cuda::detail::create_terminal_count_sort_workspace(
             typed_workspace.phase_scratch, 0u,
             typed_workspace.request_capacity);
-    ASSERT_EQ(algo::cuda::sort::sort_pairs(
-                  typed_workspace.request_keys, d_requests, request_count,
+    ASSERT_EQ(algo::cuda::sort::sort_by_key(
+                  typed_workspace.request_keys,
+                  algo::cuda::sort::value_arrays(d_requests), request_count,
                   count_sort_workspace.sort_workspace,
                   count_sort_workspace.sort_workspace_size, nullptr),
               cudaSuccess);
@@ -124,8 +125,9 @@ TEST(CudaTerminalEditRequests, PruneKeepsCanonicalAncestorOnly) {
         cuda::detail::create_terminal_count_sort_workspace(
             typed_workspace.phase_scratch, 0u,
             typed_workspace.request_capacity);
-    ASSERT_EQ(algo::cuda::sort::sort_pairs(
-                  typed_workspace.request_keys, d_requests, request_count,
+    ASSERT_EQ(algo::cuda::sort::sort_by_key(
+                  typed_workspace.request_keys,
+                  algo::cuda::sort::value_arrays(d_requests), request_count,
                   count_sort_workspace.sort_workspace,
                   count_sort_workspace.sort_workspace_size, nullptr),
               cudaSuccess);

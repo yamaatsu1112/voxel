@@ -23,9 +23,10 @@ terminal_count_sort_workspace_size(std::uint32_t count_segment_count,
   offset += terminal_common_scan_workspace_size(count_segment_count,
                                                 request_capacity);
   offset = detail::align_up<std::max_align_t>(offset);
-  offset += algo::cuda::sort::required_pairs_workspace_size<std::uint32_t,
-                                                            TerminalRequest>(
-      request_capacity);
+  offset += algo::cuda::sort::required_sort_by_key_workspace_size<
+      std::uint32_t>(
+      request_capacity,
+      algo::cuda::sort::value_arrays(static_cast<TerminalRequest *>(nullptr)));
   return offset;
 }
 
@@ -40,8 +41,11 @@ create_terminal_count_sort_workspace(void *workspace,
                                           request_capacity);
   reserve_workspace<std::max_align_t>(workspace, result.scan_workspace_size,
                                       offset, result.scan_workspace);
-  result.sort_workspace_size = algo::cuda::sort::required_pairs_workspace_size<
-      std::uint32_t, TerminalRequest>(request_capacity);
+  result.sort_workspace_size =
+      algo::cuda::sort::required_sort_by_key_workspace_size<std::uint32_t>(
+          request_capacity,
+          algo::cuda::sort::value_arrays(
+              static_cast<TerminalRequest *>(nullptr)));
   reserve_workspace<std::max_align_t>(workspace, result.sort_workspace_size,
                                       offset, result.sort_workspace);
   return result;

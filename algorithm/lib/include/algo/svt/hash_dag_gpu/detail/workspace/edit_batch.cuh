@@ -149,9 +149,10 @@ inline std::size_t edit_workspace_size(std::uint32_t count) {
   offset += sizeof(std::uint32_t);
 
   offset = align_up<std::max_align_t>(offset);
-  offset +=
-      algo::cuda::sort::required_pairs_workspace_size<std::uint32_t,
-                                                      std::uint64_t>(count);
+  offset += algo::cuda::sort::required_sort_by_key_workspace_size<
+      std::uint32_t>(
+      count,
+      algo::cuda::sort::value_arrays(static_cast<std::uint64_t *>(nullptr)));
 
   offset = align_up<std::max_align_t>(offset);
   offset += algo::cuda::scan::required_workspace_size_fused<std::uint32_t>(
@@ -202,8 +203,10 @@ inline EditWorkspace create_edit_workspace(void *workspace,
       DeviceHashDagGpu::Allocator::Device{result.temp_dedup_allocator_next}};
 
   result.sort_workspace_size =
-      algo::cuda::sort::required_pairs_workspace_size<std::uint32_t,
-                                                      std::uint64_t>(count);
+      algo::cuda::sort::required_sort_by_key_workspace_size<std::uint32_t>(
+          count,
+          algo::cuda::sort::value_arrays(
+              static_cast<std::uint64_t *>(nullptr)));
   reserve_workspace<std::max_align_t>(workspace, result.sort_workspace_size,
                                       offset, result.sort_workspace);
 

@@ -1,11 +1,12 @@
 #pragma once
 
 #include <algo/cuda/sort/radix/common.cuh>
+#include <algo/cuda/sort/radix/warp_rank/count_update.cuh>
 
 namespace algo::cuda::sort::detail {
 
 template <> struct warp_rank_impl<BucketBallotWarpRank> {
-    template <int BlockSize, int RadixBits>
+    template <class CountUpdater, int BlockSize, int RadixBits>
     __device__ static std::uint32_t compute(std::uint32_t* warp_counts,
                                             std::uint32_t digit, bool valid) {
         static_assert(
@@ -25,9 +26,11 @@ template <> struct warp_rank_impl<BucketBallotWarpRank> {
             const unsigned int bucket_mask =
                 __ballot_sync(kWarpMask, valid && digit == bucket);
             if (lane == 0) {
-                warp_counts[static_cast<std::size_t>(warp) * kNumBuckets +
-                            bucket] =
+                const std::size_t index =
+                    static_cast<std::size_t>(warp) * kNumBuckets + bucket;
+                const auto count =
                     static_cast<std::uint32_t>(__popc(bucket_mask));
+                CountUpdater::update(warp_counts, index, count);
             }
             if (valid && digit == bucket) {
                 const unsigned int lower_lanes =

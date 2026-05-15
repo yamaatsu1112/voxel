@@ -98,11 +98,11 @@ __device__ inline bool apply_terminal_brick_mask_preallocated(
     const std::uint32_t mask_high =
         static_cast<std::uint32_t>(mask.mask64 >> 32u);
     if (filled) {
-        atomicOr(&svo.leaves[leaf_index].voxel_data_low, mask_low);
-        atomicOr(&svo.leaves[leaf_index].voxel_data_high, mask_high);
+        svo.leaves[leaf_index].voxel_data_low |= mask_low;
+        svo.leaves[leaf_index].voxel_data_high |= mask_high;
     } else {
-        atomicAnd(&svo.leaves[leaf_index].voxel_data_low, ~mask_low);
-        atomicAnd(&svo.leaves[leaf_index].voxel_data_high, ~mask_high);
+        svo.leaves[leaf_index].voxel_data_low &= ~mask_low;
+        svo.leaves[leaf_index].voxel_data_high &= ~mask_high;
     }
     return true;
 }

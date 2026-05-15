@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algo/cuda/scan/scan.cuh>
+#include <algo/cuda/sort/value_arrays.cuh>
 
 #include <cstddef>
 #include <cstdint>
@@ -23,10 +24,7 @@ using DefaultConfig =
               512, 4>;
 
 template <class T>
-inline constexpr bool kSupportedKeyType = std::is_same_v<T, std::uint32_t>;
-
-template <class T>
-inline constexpr bool kSupportedValueType = std::is_trivially_copyable_v<T>;
+inline constexpr bool kSupportedKeyType = radix_key_traits<T>::kSupported;
 
 template <class> inline constexpr bool kAlwaysFalse = false;
 
@@ -39,7 +37,7 @@ template <class Config, class Key>
 std::size_t validate_workspace(std::uint32_t count, void* workspace,
                                std::size_t workspace_size) {
     static_assert(kSupportedKeyType<Key>,
-                  "sort currently only supports std::uint32_t keys");
+                  "sort key type is not supported");
 
     const std::size_t required =
         sort_impl<Config>::template required_workspace_size<Key>(count);
@@ -50,17 +48,17 @@ std::size_t validate_workspace(std::uint32_t count, void* workspace,
     return 0;
 }
 
-template <class Config, class Key, class Value>
-std::size_t validate_pairs_workspace(std::uint32_t count, void* workspace,
-                                     std::size_t workspace_size) {
+template <class Config, class Key, class... Values>
+std::size_t validate_by_key_workspace(std::uint32_t count, void* workspace,
+                                      std::size_t workspace_size) {
     static_assert(kSupportedKeyType<Key>,
-                  "sort_pairs currently only supports std::uint32_t keys");
-    static_assert(kSupportedValueType<Value>,
-                  "sort_pairs requires trivially copyable values");
+                  "sort_by_key key type is not supported");
+    static_assert(kSupportedValueArrayTypes<Values...>,
+                  "sort_by_key requires trivially copyable values");
 
     const std::size_t required =
-        sort_impl<Config>::template required_pairs_workspace_size<Key, Value>(
-            count);
+        sort_impl<Config>::template required_sort_by_key_workspace_size<
+            Key, Values...>(count);
     if (required == 0)
         return 0;
     if (workspace == nullptr || workspace_size < required)
@@ -79,15 +77,17 @@ cudaError_t sort_keys_impl(Key* d_keys, std::uint32_t count, void* workspace,
                                                       workspace_size, stream);
 }
 
-template <class Config, class Key, class Value>
-cudaError_t sort_pairs_impl(Key* d_keys, Value* d_values, std::uint32_t count,
-                            void* workspace, std::size_t workspace_size,
-                            cudaStream_t stream) {
-    const std::size_t missing = validate_pairs_workspace<Config, Key, Value>(
-        count, workspace, workspace_size);
+template <class Config, class Key, class... Values>
+cudaError_t sort_by_key_impl(Key* d_keys, value_arrays_t<Values...> d_values,
+                             std::uint32_t count, void* workspace,
+                             std::size_t workspace_size,
+                             cudaStream_t stream) {
+    const std::size_t missing =
+        validate_by_key_workspace<Config, Key, Values...>(
+            count, workspace, workspace_size);
     if (missing != 0)
         return cudaErrorInvalidValue;
-    return sort_impl<Config>::template sort_pairs<Key, Value>(
+    return sort_impl<Config>::template sort_by_key<Key, Values...>(
         d_keys, d_values, count, workspace, workspace_size, stream);
 }
 
@@ -115,29 +115,32 @@ cudaError_t sort_keys(Key* d_keys, std::uint32_t count, void* d_workspace,
                                                  workspace_size, stream);
 }
 
-template <class Config, class Key, class Value>
-cudaError_t sort_pairs(Key* d_keys, Value* d_values, std::uint32_t count,
-                       void* d_workspace, std::size_t workspace_size,
-                       cudaStream_t stream = nullptr) {
-    if ((d_keys == nullptr || d_values == nullptr) && count != 0) {
+template <class Config, class Key, class... Values>
+cudaError_t sort_by_key(Key* d_keys, value_arrays_t<Values...> d_values,
+                        std::uint32_t count, void* d_workspace,
+                        std::size_t workspace_size,
+                        cudaStream_t stream = nullptr) {
+    if (d_keys == nullptr && count != 0)
         return cudaErrorInvalidValue;
-    }
-    return detail::sort_pairs_impl<Config, Key, Value>(
+    if (count != 0 && !detail::all_value_array_pointers_valid(d_values))
+        return cudaErrorInvalidValue;
+    return detail::sort_by_key_impl<Config, Key, Values...>(
         d_keys, d_values, count, d_workspace, workspace_size, stream);
 }
 
-template <class Key, class Value>
-cudaError_t sort_pairs(Key* d_keys, Value* d_values, std::uint32_t count,
-                       void* d_workspace, std::size_t workspace_size,
-                       cudaStream_t stream = nullptr) {
-    return sort_pairs<detail::DefaultConfig, Key, Value>(
+template <class Key, class... Values>
+cudaError_t sort_by_key(Key* d_keys, value_arrays_t<Values...> d_values,
+                        std::uint32_t count, void* d_workspace,
+                        std::size_t workspace_size,
+                        cudaStream_t stream = nullptr) {
+    return sort_by_key<detail::DefaultConfig, Key, Values...>(
         d_keys, d_values, count, d_workspace, workspace_size, stream);
 }
 
 template <class Config, class Key>
 std::size_t required_workspace_size(std::uint32_t count) {
     static_assert(detail::kSupportedKeyType<Key>,
-                  "sort currently only supports std::uint32_t keys");
+                  "sort key type is not supported");
     return detail::sort_impl<Config>::template required_workspace_size<Key>(
         count);
 }
@@ -146,20 +149,21 @@ template <class Key> std::size_t required_workspace_size(std::uint32_t count) {
     return required_workspace_size<detail::DefaultConfig, Key>(count);
 }
 
-template <class Config, class Key, class Value>
-std::size_t required_pairs_workspace_size(std::uint32_t count) {
+template <class Config, class Key, class... Values>
+std::size_t required_sort_by_key_workspace_size(std::uint32_t count) {
     static_assert(detail::kSupportedKeyType<Key>,
-                  "sort_pairs currently only supports std::uint32_t keys");
-    static_assert(detail::kSupportedValueType<Value>,
-                  "sort_pairs requires trivially copyable values");
-    return detail::sort_impl<Config>::template required_pairs_workspace_size<
-        Key, Value>(count);
+                  "sort_by_key key type is not supported");
+    static_assert(detail::kSupportedValueArrayTypes<Values...>,
+                  "sort_by_key requires trivially copyable values");
+    return detail::sort_impl<Config>::
+        template required_sort_by_key_workspace_size<Key, Values...>(count);
 }
 
-template <class Key, class Value>
-std::size_t required_pairs_workspace_size(std::uint32_t count) {
-    return required_pairs_workspace_size<detail::DefaultConfig, Key, Value>(
-        count);
+template <class Key, class... Values>
+std::size_t required_sort_by_key_workspace_size(
+    std::uint32_t count, value_arrays_t<Values...>) {
+    return required_sort_by_key_workspace_size<detail::DefaultConfig, Key,
+                                               Values...>(count);
 }
 
 } // namespace algo::cuda::sort

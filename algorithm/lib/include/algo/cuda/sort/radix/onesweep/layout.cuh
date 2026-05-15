@@ -2,6 +2,7 @@
 
 #include <algo/cuda/sort/common.cuh>
 #include <algo/cuda/sort/radix/common.cuh>
+#include <algo/cuda/sort/value_arrays.cuh>
 
 namespace algo::cuda::sort::detail {
 
@@ -11,17 +12,18 @@ struct onesweep_lookback_record {
 
 template <class BlockHistogramPolicy, class LocalRankPolicy,
           class GlobalOffsetsBlockHistogramPolicy, int ItemsPerThread,
-          int BlockSize, int RadixBits, int KeyBits>
+          int BlockSize, int RadixBits, int KeyBits, class Key>
 struct workspace_layout<
     RadixSort<OneSweepPass<BlockHistogramPolicy, LocalRankPolicy,
                            GlobalOffsetsBlockHistogramPolicy, ItemsPerThread>,
-              BlockSize, RadixBits, KeyBits>> {
+              BlockSize, RadixBits, KeyBits>,
+    Key> {
   static constexpr std::uint32_t kNumBuckets =
       static_cast<std::uint32_t>(1u << RadixBits);
   static constexpr std::uint32_t kPassCount =
       static_cast<std::uint32_t>(KeyBits / RadixBits);
 
-  std::uint32_t *temp_keys = nullptr;
+  Key *temp_keys = nullptr;
   std::uint32_t *global_offsets = nullptr;
   std::uint32_t *tile_counter = nullptr;
   onesweep_lookback_record *lookback_records = nullptr;
@@ -39,8 +41,8 @@ struct workspace_layout<
     const std::uint32_t blocks = block_count(count);
     std::size_t offset = 0;
 
-    offset = align_up<std::uint32_t>(offset);
-    offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+    offset = align_up<Key>(offset);
+    offset += sizeof(Key) * static_cast<std::size_t>(count);
 
     offset = align_up<std::uint32_t>(offset);
     offset += sizeof(std::uint32_t) * static_cast<std::size_t>(kPassCount) *
@@ -62,9 +64,9 @@ struct workspace_layout<
 
     std::size_t offset = 0;
 
-    offset = align_up<std::uint32_t>(offset);
-    layout.temp_keys = pointer_at<std::uint32_t>(workspace, offset);
-    offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+    offset = align_up<Key>(offset);
+    layout.temp_keys = pointer_at<Key>(workspace, offset);
+    offset += sizeof(Key) * static_cast<std::size_t>(count);
 
     offset = align_up<std::uint32_t>(offset);
     layout.global_offsets = pointer_at<std::uint32_t>(workspace, offset);
@@ -85,19 +87,21 @@ struct workspace_layout<
 
 template <class BlockHistogramPolicy, class LocalRankPolicy,
           class GlobalOffsetsBlockHistogramPolicy, int ItemsPerThread,
-          int BlockSize, int RadixBits, int KeyBits, class Value>
-struct pair_workspace_layout<
+          int BlockSize, int RadixBits, int KeyBits, class Key,
+          class... Values>
+struct by_key_workspace_layout<
     RadixSort<OneSweepPass<BlockHistogramPolicy, LocalRankPolicy,
                            GlobalOffsetsBlockHistogramPolicy, ItemsPerThread>,
               BlockSize, RadixBits, KeyBits>,
-    Value> {
+    Key,
+    value_arrays_t<Values...>> {
   static constexpr std::uint32_t kNumBuckets =
       static_cast<std::uint32_t>(1u << RadixBits);
   static constexpr std::uint32_t kPassCount =
       static_cast<std::uint32_t>(KeyBits / RadixBits);
 
-  std::uint32_t *temp_keys = nullptr;
-  Value *temp_values = nullptr;
+  Key *temp_keys = nullptr;
+  value_arrays_t<Values...> temp_values{};
   std::uint32_t *global_offsets = nullptr;
   std::uint32_t *tile_counter = nullptr;
   onesweep_lookback_record *lookback_records = nullptr;
@@ -115,11 +119,10 @@ struct pair_workspace_layout<
     const std::uint32_t blocks = block_count(count);
     std::size_t offset = 0;
 
-    offset = align_up<std::uint32_t>(offset);
-    offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+    offset = align_up<Key>(offset);
+    offset += sizeof(Key) * static_cast<std::size_t>(count);
 
-    offset = align_up<Value>(offset);
-    offset += sizeof(Value) * static_cast<std::size_t>(count);
+    offset = add_value_array_temp_storage_size<Values...>(offset, count);
 
     offset = align_up<std::uint32_t>(offset);
     offset += sizeof(std::uint32_t) * static_cast<std::size_t>(kPassCount) *
@@ -135,19 +138,18 @@ struct pair_workspace_layout<
     return offset;
   }
 
-  static pair_workspace_layout create(void *workspace, std::uint32_t count) {
-    pair_workspace_layout layout{};
+  static by_key_workspace_layout create(void *workspace, std::uint32_t count) {
+    by_key_workspace_layout layout{};
     layout.num_blocks = block_count(count);
 
     std::size_t offset = 0;
 
-    offset = align_up<std::uint32_t>(offset);
-    layout.temp_keys = pointer_at<std::uint32_t>(workspace, offset);
-    offset += sizeof(std::uint32_t) * static_cast<std::size_t>(count);
+    offset = align_up<Key>(offset);
+    layout.temp_keys = pointer_at<Key>(workspace, offset);
+    offset += sizeof(Key) * static_cast<std::size_t>(count);
 
-    offset = align_up<Value>(offset);
-    layout.temp_values = pointer_at<Value>(workspace, offset);
-    offset += sizeof(Value) * static_cast<std::size_t>(count);
+    layout.temp_values =
+        allocate_temp_value_arrays<Values...>(workspace, offset, count);
 
     offset = align_up<std::uint32_t>(offset);
     layout.global_offsets = pointer_at<std::uint32_t>(workspace, offset);

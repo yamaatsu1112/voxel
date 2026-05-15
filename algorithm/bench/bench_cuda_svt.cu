@@ -2,7 +2,6 @@
 #include <benchmark/benchmark.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -13,6 +12,15 @@ using algo::svt::cuda::VoxelEdit;
 using EditGenerator = std::vector<VoxelEdit> (*)(std::uint32_t);
 using BenchmarkGpuSvo = algo::svt::cuda::GpuSvo<(1u << 26), (1u << 24)>;
 
+inline constexpr std::int32_t kAlignedSphereCenter =
+    static_cast<std::int32_t>(algo::svt::cuda::kWorldVoxelCount / 2u);
+
+struct Sphere {
+    std::int32_t center_x;
+    std::int32_t center_y;
+    std::int32_t center_z;
+};
+
 bool has_cuda_device() {
     int count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
@@ -22,26 +30,61 @@ std::uint32_t block_count(std::uint32_t count, std::uint32_t block_size) {
     return (count + block_size - 1u) / block_size;
 }
 
-std::uint32_t dense_side_for(std::uint32_t count) {
-    std::uint32_t side = static_cast<std::uint32_t>(
-        std::ceil(std::cbrt(static_cast<double>(count))));
-    side = std::max(side, 1u);
-    while (side * side * side < count)
-        ++side;
-    return side;
+std::uint64_t square(std::int64_t value) {
+    return static_cast<std::uint64_t>(value * value);
 }
 
-std::vector<VoxelEdit> make_dense_edits(std::uint32_t count) {
-    const std::uint32_t side = dense_side_for(count);
+bool voxel_inside_sphere(Sphere sphere, std::int32_t x, std::int32_t y,
+                         std::int32_t z, std::uint32_t radius) {
+    const std::int64_t dx = static_cast<std::int64_t>(x) - sphere.center_x;
+    const std::int64_t dy = static_cast<std::int64_t>(y) - sphere.center_y;
+    const std::int64_t dz = static_cast<std::int64_t>(z) - sphere.center_z;
+    return square(dx) + square(dy) + square(dz) <=
+           square(static_cast<std::int64_t>(radius));
+}
+
+Sphere centered_sphere() {
+    return {kAlignedSphereCenter, kAlignedSphereCenter, kAlignedSphereCenter};
+}
+
+Sphere half_overlap_sphere(std::uint32_t radius) {
+    return {kAlignedSphereCenter +
+                static_cast<std::int32_t>(radius / 2u),
+            kAlignedSphereCenter, kAlignedSphereCenter};
+}
+
+std::vector<VoxelEdit> make_voxel_sphere_edits(Sphere sphere,
+                                               std::uint32_t radius) {
     std::vector<VoxelEdit> edits;
-    edits.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i) {
-        const std::uint32_t x = i % side;
-        const std::uint32_t y = (i / side) % side;
-        const std::uint32_t z = i / (side * side);
-        edits.push_back(VoxelEdit{x, y, z});
-    }
+    const std::int32_t begin_x =
+        sphere.center_x - static_cast<std::int32_t>(radius);
+    const std::int32_t end_x =
+        sphere.center_x + static_cast<std::int32_t>(radius);
+    const std::int32_t begin_y =
+        sphere.center_y - static_cast<std::int32_t>(radius);
+    const std::int32_t end_y =
+        sphere.center_y + static_cast<std::int32_t>(radius);
+    const std::int32_t begin_z =
+        sphere.center_z - static_cast<std::int32_t>(radius);
+    const std::int32_t end_z =
+        sphere.center_z + static_cast<std::int32_t>(radius);
+
+    for (std::int32_t z = begin_z; z <= end_z; ++z)
+        for (std::int32_t y = begin_y; y <= end_y; ++y)
+            for (std::int32_t x = begin_x; x <= end_x; ++x)
+                if (voxel_inside_sphere(sphere, x, y, z, radius))
+                    edits.push_back(VoxelEdit{static_cast<std::uint32_t>(x),
+                                              static_cast<std::uint32_t>(y),
+                                              static_cast<std::uint32_t>(z)});
     return edits;
+}
+
+std::vector<VoxelEdit> make_sphere_edits(std::uint32_t radius) {
+    return make_voxel_sphere_edits(centered_sphere(), radius);
+}
+
+std::vector<VoxelEdit> make_half_overlap_sphere_edits(std::uint32_t radius) {
+    return make_voxel_sphere_edits(half_overlap_sphere(radius), radius);
 }
 
 std::uint32_t next_random(std::uint32_t &state) {
@@ -160,6 +203,7 @@ void destroy_events(cudaEvent_t start, cudaEvent_t stop) {
 }
 
 void set_voxel_edit_counters(benchmark::State &state, std::uint32_t count) {
+    state.counters["voxel_count"] = static_cast<double>(count);
     state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
                             static_cast<int64_t>(count));
     state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
@@ -187,8 +231,9 @@ void BM_CudaSvtVoxelEditsToLeafMasks(benchmark::State &state,
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto count = static_cast<std::uint32_t>(edits.size());
 
     DeviceBuffer<VoxelEdit> d_edits;
     DeviceBuffer<algo::svt::cuda::LeafMask> d_leaf_masks;
@@ -231,16 +276,24 @@ void BM_CudaSvtVoxelEditsToLeafMasks(benchmark::State &state,
 
 template <class EditConfig>
 void BM_CudaSvtPlaceVoxelEdits(benchmark::State &state,
-                               EditGenerator make_edits) {
+                               EditGenerator make_edits,
+                               bool preseed_centered_sphere = false) {
     if (!has_cuda_device()) {
         state.SkipWithError("CUDA device is not available");
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto preseed_edits =
+        preseed_centered_sphere
+            ? make_sphere_edits(static_cast<std::uint32_t>(state.range(0)))
+            : std::vector<VoxelEdit>{};
+    const auto count = static_cast<std::uint32_t>(edits.size());
+    const auto preseed_count = static_cast<std::uint32_t>(preseed_edits.size());
 
     DeviceBuffer<VoxelEdit> d_edits;
+    DeviceBuffer<VoxelEdit> d_preseed_edits;
     DeviceBuffer<std::byte> workspace;
     cudaEvent_t start = nullptr;
     cudaEvent_t stop = nullptr;
@@ -254,10 +307,16 @@ void BM_CudaSvtPlaceVoxelEdits(benchmark::State &state,
     }
 
     if (!d_edits.allocate(count, state, "cudaMalloc failed for voxel edits") ||
+        (preseed_centered_sphere &&
+         !d_preseed_edits.allocate(preseed_count, state,
+                                   "cudaMalloc failed for preseed edits")) ||
         !workspace.allocate(workspace_size, state,
                             "cudaMalloc failed for workspace") ||
         !copy_to_device(d_edits.get(), edits, state,
                         "cudaMemcpy failed for voxel edits") ||
+        (preseed_centered_sphere &&
+         !copy_to_device(d_preseed_edits.get(), preseed_edits, state,
+                         "cudaMemcpy failed for preseed edits")) ||
         !create_events(&start, &stop, state)) {
         destroy_events(start, stop);
         return;
@@ -266,6 +325,13 @@ void BM_CudaSvtPlaceVoxelEdits(benchmark::State &state,
     for (auto _ : state) {
         if (algo::svt::cuda::reset_svo(svo.view()) != cudaSuccess) {
             state.SkipWithError("reset_svo failed");
+            break;
+        }
+        if (preseed_centered_sphere &&
+            algo::svt::cuda::place_voxel_edits<EditConfig>(
+                svo.view(), d_preseed_edits.get(), preseed_count,
+                workspace.get(), workspace_size) != cudaSuccess) {
+            state.SkipWithError("preseed place_voxel_edits failed");
             break;
         }
         if (!record_start(start, state))
@@ -286,16 +352,24 @@ void BM_CudaSvtPlaceVoxelEdits(benchmark::State &state,
 
 template <class EditConfig>
 void BM_CudaSvtDestroyVoxelEdits(benchmark::State &state,
-                                 EditGenerator make_edits) {
+                                 EditGenerator make_edits,
+                                 bool preseed_centered_sphere = false) {
     if (!has_cuda_device()) {
         state.SkipWithError("CUDA device is not available");
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto preseed_edits =
+        preseed_centered_sphere
+            ? make_sphere_edits(static_cast<std::uint32_t>(state.range(0)))
+            : std::vector<VoxelEdit>{};
+    const auto count = static_cast<std::uint32_t>(edits.size());
+    const auto preseed_count = static_cast<std::uint32_t>(preseed_edits.size());
 
     DeviceBuffer<VoxelEdit> d_edits;
+    DeviceBuffer<VoxelEdit> d_preseed_edits;
     DeviceBuffer<std::byte> place_workspace;
     DeviceBuffer<std::byte> destroy_workspace;
     cudaEvent_t start = nullptr;
@@ -312,6 +386,9 @@ void BM_CudaSvtDestroyVoxelEdits(benchmark::State &state,
     }
 
     if (!d_edits.allocate(count, state, "cudaMalloc failed for voxel edits") ||
+        (preseed_centered_sphere &&
+         !d_preseed_edits.allocate(preseed_count, state,
+                                   "cudaMalloc failed for preseed edits")) ||
         !place_workspace.allocate(place_workspace_size, state,
                                   "cudaMalloc failed for place workspace") ||
         !destroy_workspace.allocate(
@@ -319,6 +396,9 @@ void BM_CudaSvtDestroyVoxelEdits(benchmark::State &state,
             "cudaMalloc failed for destroy workspace") ||
         !copy_to_device(d_edits.get(), edits, state,
                         "cudaMemcpy failed for voxel edits") ||
+        (preseed_centered_sphere &&
+         !copy_to_device(d_preseed_edits.get(), preseed_edits, state,
+                         "cudaMemcpy failed for preseed edits")) ||
         !create_events(&start, &stop, state)) {
         destroy_events(start, stop);
         return;
@@ -327,6 +407,13 @@ void BM_CudaSvtDestroyVoxelEdits(benchmark::State &state,
     for (auto _ : state) {
         if (algo::svt::cuda::reset_svo(svo.view()) != cudaSuccess) {
             state.SkipWithError("reset_svo failed");
+            break;
+        }
+        if (preseed_centered_sphere &&
+            algo::svt::cuda::place_voxel_edits<EditConfig>(
+                svo.view(), d_preseed_edits.get(), preseed_count,
+                place_workspace.get(), place_workspace_size) != cudaSuccess) {
+            state.SkipWithError("preseed place_voxel_edits setup failed");
             break;
         }
         if (algo::svt::cuda::place_voxel_edits<EditConfig>(
@@ -357,8 +444,9 @@ void BM_CudaSvtGetVoxel(benchmark::State &state, EditGenerator make_edits) {
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto count = static_cast<std::uint32_t>(edits.size());
 
     DeviceBuffer<VoxelEdit> d_queries;
     DeviceBuffer<std::uint8_t> d_results;
@@ -418,6 +506,10 @@ void apply_svt_args(benchmark::internal::Benchmark *bench) {
     bench->Arg(1 << 16)->Arg(1 << 18)->Arg(1 << 20)->Arg(1 << 22)->Arg(1 << 24);
 }
 
+void apply_svt_sphere_args(benchmark::internal::Benchmark *bench) {
+    bench->Arg(128);
+}
+
 #define SVT_EDIT_CONFIGS(X)                                                    \
     X(ScanDepthwise,                                                           \
       algo::svt::cuda::EditConfig<algo::svt::cuda::ScanDepthwiseAllocation,    \
@@ -457,8 +549,14 @@ void apply_svt_args(benchmark::internal::Benchmark *bench) {
                                   algo::svt::cuda::HostLeafCountDispatch>)
 
 #define DEFINE_PLACE_BENCHMARK(Name, ...)                                      \
-    void BM_CudaSvtPlaceVoxelEditsDense##Name(benchmark::State &state) {       \
-        BM_CudaSvtPlaceVoxelEdits<__VA_ARGS__>(state, make_dense_edits);       \
+    void BM_CudaSvtPlaceVoxelEditsSphere##Name(benchmark::State &state) {      \
+        BM_CudaSvtPlaceVoxelEdits<__VA_ARGS__>(state, make_sphere_edits);      \
+    }                                                                          \
+                                                                               \
+    void BM_CudaSvtPlaceVoxelEditsSphereHalfOverlap##Name(benchmark::State     \
+                                                              &state) {        \
+        BM_CudaSvtPlaceVoxelEdits<__VA_ARGS__>(                                \
+            state, make_half_overlap_sphere_edits, true);                      \
     }                                                                          \
                                                                                \
     void BM_CudaSvtPlaceVoxelEditsRandom##Name(benchmark::State &state) {      \
@@ -470,8 +568,14 @@ SVT_EDIT_CONFIGS(DEFINE_PLACE_BENCHMARK)
 #undef DEFINE_PLACE_BENCHMARK
 
 #define DEFINE_DESTROY_BENCHMARK(Name, ...)                                    \
-    void BM_CudaSvtDestroyVoxelEditsDense##Name(benchmark::State &state) {     \
-        BM_CudaSvtDestroyVoxelEdits<__VA_ARGS__>(state, make_dense_edits);     \
+    void BM_CudaSvtDestroyVoxelEditsSphere##Name(benchmark::State &state) {    \
+        BM_CudaSvtDestroyVoxelEdits<__VA_ARGS__>(state, make_sphere_edits);    \
+    }                                                                          \
+                                                                               \
+    void BM_CudaSvtDestroyVoxelEditsSphereHalfOverlap##Name(benchmark::State   \
+                                                                &state) {      \
+        BM_CudaSvtDestroyVoxelEdits<__VA_ARGS__>(                              \
+            state, make_half_overlap_sphere_edits, true);                      \
     }                                                                          \
                                                                                \
     void BM_CudaSvtDestroyVoxelEditsRandom##Name(benchmark::State &state) {    \
@@ -482,33 +586,47 @@ SVT_EDIT_CONFIGS(DEFINE_DESTROY_BENCHMARK)
 
 #undef DEFINE_DESTROY_BENCHMARK
 
-void BM_CudaSvtVoxelEditsToLeafMasksDense(benchmark::State &state) {
-    BM_CudaSvtVoxelEditsToLeafMasks(state, make_dense_edits);
+void BM_CudaSvtVoxelEditsToLeafMasksSphere(benchmark::State &state) {
+    BM_CudaSvtVoxelEditsToLeafMasks(state, make_sphere_edits);
+}
+
+void BM_CudaSvtVoxelEditsToLeafMasksSphereHalfOverlap(benchmark::State &state) {
+    BM_CudaSvtVoxelEditsToLeafMasks(state, make_half_overlap_sphere_edits);
 }
 
 void BM_CudaSvtVoxelEditsToLeafMasksRandom(benchmark::State &state) {
     BM_CudaSvtVoxelEditsToLeafMasks(state, make_random_edits);
 }
 
-void BM_CudaSvtGetVoxelDense(benchmark::State &state) {
-    BM_CudaSvtGetVoxel(state, make_dense_edits);
+void BM_CudaSvtGetVoxelSphere(benchmark::State &state) {
+    BM_CudaSvtGetVoxel(state, make_sphere_edits);
+}
+
+void BM_CudaSvtGetVoxelSphereHalfOverlap(benchmark::State &state) {
+    BM_CudaSvtGetVoxel(state, make_half_overlap_sphere_edits);
 }
 
 void BM_CudaSvtGetVoxelRandom(benchmark::State &state) {
     BM_CudaSvtGetVoxel(state, make_random_edits);
 }
 
-BENCHMARK(BM_CudaSvtVoxelEditsToLeafMasksDense)
+BENCHMARK(BM_CudaSvtVoxelEditsToLeafMasksSphere)
     ->UseManualTime()
-    ->Apply(apply_svt_args);
+    ->Apply(apply_svt_sphere_args);
+BENCHMARK(BM_CudaSvtVoxelEditsToLeafMasksSphereHalfOverlap)
+    ->UseManualTime()
+    ->Apply(apply_svt_sphere_args);
 BENCHMARK(BM_CudaSvtVoxelEditsToLeafMasksRandom)
     ->UseManualTime()
     ->Apply(apply_svt_args);
 
 #define REGISTER_PLACE_BENCHMARK(Name, ...)                                    \
-    BENCHMARK(BM_CudaSvtPlaceVoxelEditsDense##Name)                            \
+    BENCHMARK(BM_CudaSvtPlaceVoxelEditsSphere##Name)                           \
         ->UseManualTime()                                                      \
-        ->Apply(apply_svt_args);                                               \
+        ->Apply(apply_svt_sphere_args);                                        \
+    BENCHMARK(BM_CudaSvtPlaceVoxelEditsSphereHalfOverlap##Name)                \
+        ->UseManualTime()                                                      \
+        ->Apply(apply_svt_sphere_args);                                        \
     BENCHMARK(BM_CudaSvtPlaceVoxelEditsRandom##Name)                           \
         ->UseManualTime()                                                      \
         ->Apply(apply_svt_args);
@@ -518,9 +636,12 @@ SVT_EDIT_CONFIGS(REGISTER_PLACE_BENCHMARK)
 #undef REGISTER_PLACE_BENCHMARK
 
 #define REGISTER_DESTROY_BENCHMARK(Name, ...)                                  \
-    BENCHMARK(BM_CudaSvtDestroyVoxelEditsDense##Name)                          \
+    BENCHMARK(BM_CudaSvtDestroyVoxelEditsSphere##Name)                         \
         ->UseManualTime()                                                      \
-        ->Apply(apply_svt_args);                                               \
+        ->Apply(apply_svt_sphere_args);                                        \
+    BENCHMARK(BM_CudaSvtDestroyVoxelEditsSphereHalfOverlap##Name)              \
+        ->UseManualTime()                                                      \
+        ->Apply(apply_svt_sphere_args);                                        \
     BENCHMARK(BM_CudaSvtDestroyVoxelEditsRandom##Name)                         \
         ->UseManualTime()                                                      \
         ->Apply(apply_svt_args);
@@ -529,7 +650,12 @@ SVT_EDIT_CONFIGS(REGISTER_DESTROY_BENCHMARK)
 
 #undef REGISTER_DESTROY_BENCHMARK
 
-BENCHMARK(BM_CudaSvtGetVoxelDense)->UseManualTime()->Apply(apply_svt_args);
+BENCHMARK(BM_CudaSvtGetVoxelSphere)
+    ->UseManualTime()
+    ->Apply(apply_svt_sphere_args);
+BENCHMARK(BM_CudaSvtGetVoxelSphereHalfOverlap)
+    ->UseManualTime()
+    ->Apply(apply_svt_sphere_args);
 BENCHMARK(BM_CudaSvtGetVoxelRandom)->UseManualTime()->Apply(apply_svt_args);
 
 #undef SVT_EDIT_CONFIGS

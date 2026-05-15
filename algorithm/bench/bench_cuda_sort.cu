@@ -154,7 +154,7 @@ void run_benchmark(benchmark::State& state) {
 }
 
 template <class Config, class Value>
-void run_pairs_benchmark(benchmark::State& state) {
+void run_by_key_benchmark(benchmark::State& state) {
     if (!has_cuda_device()) {
         state.SkipWithError("CUDA device is not available");
         return;
@@ -205,8 +205,8 @@ void run_pairs_benchmark(benchmark::State& state) {
     }
 
     const std::size_t workspace_size =
-        algo::cuda::sort::required_pairs_workspace_size<Config, std::uint32_t,
-                                                        Value>(count);
+        algo::cuda::sort::required_sort_by_key_workspace_size<
+            Config, std::uint32_t, Value>(count);
     if (cudaMalloc(reinterpret_cast<void**>(&workspace),
                    workspace_size == 0 ? 1 : workspace_size) != cudaSuccess) {
         cudaFree(d_values);
@@ -269,10 +269,11 @@ void run_pairs_benchmark(benchmark::State& state) {
             break;
         }
 
-        if ((algo::cuda::sort::sort_pairs<Config>(d_keys, d_values, count,
-                                                  workspace, workspace_size)) !=
+        if ((algo::cuda::sort::sort_by_key<Config>(
+                d_keys, algo::cuda::sort::value_arrays(d_values), count,
+                workspace, workspace_size)) !=
             cudaSuccess) {
-            state.SkipWithError("sort_pairs failed");
+            state.SkipWithError("sort_by_key failed");
             break;
         }
 
@@ -306,6 +307,190 @@ void run_pairs_benchmark(benchmark::State& state) {
     cudaFree(d_input_values);
     cudaFree(d_keys);
     cudaFree(d_input_keys);
+}
+
+template <class Config>
+void run_by_key_value_arrays32x4_benchmark(benchmark::State& state) {
+    if (!has_cuda_device()) {
+        state.SkipWithError("CUDA device is not available");
+        return;
+    }
+
+    const auto count = static_cast<std::uint32_t>(state.range(0));
+    std::vector<std::uint32_t> host_keys(count);
+    std::vector<std::uint32_t> host_x(count);
+    std::vector<std::uint32_t> host_y(count);
+    std::vector<std::uint32_t> host_z(count);
+    std::vector<std::uint32_t> host_w(count);
+    fill_random(host_keys);
+    fill_values(host_x);
+    fill_values(host_y);
+    fill_values(host_z);
+    fill_values(host_w);
+
+    std::uint32_t* d_input_keys = nullptr;
+    std::uint32_t* d_keys = nullptr;
+    std::uint32_t* d_input_x = nullptr;
+    std::uint32_t* d_input_y = nullptr;
+    std::uint32_t* d_input_z = nullptr;
+    std::uint32_t* d_input_w = nullptr;
+    std::uint32_t* d_x = nullptr;
+    std::uint32_t* d_y = nullptr;
+    std::uint32_t* d_z = nullptr;
+    std::uint32_t* d_w = nullptr;
+    std::byte* workspace = nullptr;
+    cudaEvent_t start = nullptr;
+    cudaEvent_t stop = nullptr;
+
+    benchmark::DoNotOptimize(host_keys.data());
+    benchmark::DoNotOptimize(host_x.data());
+    benchmark::DoNotOptimize(host_y.data());
+    benchmark::DoNotOptimize(host_z.data());
+    benchmark::DoNotOptimize(host_w.data());
+
+    auto cleanup = [&]() {
+        if (stop != nullptr) cudaEventDestroy(stop);
+        if (start != nullptr) cudaEventDestroy(start);
+        cudaFree(workspace);
+        cudaFree(d_w);
+        cudaFree(d_z);
+        cudaFree(d_y);
+        cudaFree(d_x);
+        cudaFree(d_input_w);
+        cudaFree(d_input_z);
+        cudaFree(d_input_y);
+        cudaFree(d_input_x);
+        cudaFree(d_keys);
+        cudaFree(d_input_keys);
+    };
+
+    auto allocate_u32 = [&](std::uint32_t** ptr, const char* message) {
+        if (cudaMalloc(reinterpret_cast<void**>(ptr),
+                       sizeof(std::uint32_t) * count) != cudaSuccess) {
+            cleanup();
+            state.SkipWithError(message);
+            return false;
+        }
+        return true;
+    };
+
+    if (!allocate_u32(&d_input_keys,
+                      "cudaMalloc failed for source key buffer") ||
+        !allocate_u32(&d_keys, "cudaMalloc failed for key buffer") ||
+        !allocate_u32(&d_input_x, "cudaMalloc failed for source x buffer") ||
+        !allocate_u32(&d_input_y, "cudaMalloc failed for source y buffer") ||
+        !allocate_u32(&d_input_z, "cudaMalloc failed for source z buffer") ||
+        !allocate_u32(&d_input_w, "cudaMalloc failed for source w buffer") ||
+        !allocate_u32(&d_x, "cudaMalloc failed for x buffer") ||
+        !allocate_u32(&d_y, "cudaMalloc failed for y buffer") ||
+        !allocate_u32(&d_z, "cudaMalloc failed for z buffer") ||
+        !allocate_u32(&d_w, "cudaMalloc failed for w buffer")) {
+        return;
+    }
+
+    const std::size_t workspace_size =
+        algo::cuda::sort::required_sort_by_key_workspace_size<
+            Config, std::uint32_t, std::uint32_t, std::uint32_t,
+            std::uint32_t, std::uint32_t>(count);
+    if (cudaMalloc(reinterpret_cast<void**>(&workspace),
+                   workspace_size == 0 ? 1 : workspace_size) != cudaSuccess) {
+        cleanup();
+        state.SkipWithError("cudaMalloc failed for workspace");
+        return;
+    }
+
+    auto copy_to_device = [&](std::uint32_t* dst,
+                              const std::vector<std::uint32_t>& src,
+                              const char* message) {
+        if (cudaMemcpy(dst, src.data(), sizeof(std::uint32_t) * count,
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+            cleanup();
+            state.SkipWithError(message);
+            return false;
+        }
+        return true;
+    };
+
+    if (!copy_to_device(d_input_keys, host_keys,
+                        "cudaMemcpy failed for source key buffer") ||
+        !copy_to_device(d_input_x, host_x,
+                        "cudaMemcpy failed for source x buffer") ||
+        !copy_to_device(d_input_y, host_y,
+                        "cudaMemcpy failed for source y buffer") ||
+        !copy_to_device(d_input_z, host_z,
+                        "cudaMemcpy failed for source z buffer") ||
+        !copy_to_device(d_input_w, host_w,
+                        "cudaMemcpy failed for source w buffer")) {
+        return;
+    }
+
+    if (cudaEventCreate(&start) != cudaSuccess ||
+        cudaEventCreate(&stop) != cudaSuccess) {
+        cleanup();
+        state.SkipWithError("cudaEventCreate failed");
+        return;
+    }
+
+    auto copy_device = [&](std::uint32_t* dst, const std::uint32_t* src,
+                           const char* message) {
+        if (cudaMemcpy(dst, src, sizeof(std::uint32_t) * count,
+                       cudaMemcpyDeviceToDevice) != cudaSuccess) {
+            state.SkipWithError(message);
+            return false;
+        }
+        return true;
+    };
+
+    for (auto _ : state) {
+        if (!copy_device(d_keys, d_input_keys,
+                         "cudaMemcpyDeviceToDevice failed for keys") ||
+            !copy_device(d_x, d_input_x,
+                         "cudaMemcpyDeviceToDevice failed for x") ||
+            !copy_device(d_y, d_input_y,
+                         "cudaMemcpyDeviceToDevice failed for y") ||
+            !copy_device(d_z, d_input_z,
+                         "cudaMemcpyDeviceToDevice failed for z") ||
+            !copy_device(d_w, d_input_w,
+                         "cudaMemcpyDeviceToDevice failed for w")) {
+            break;
+        }
+
+        if (cudaEventRecord(start) != cudaSuccess) {
+            state.SkipWithError("cudaEventRecord(start) failed");
+            break;
+        }
+
+        if ((algo::cuda::sort::sort_by_key<Config>(
+                d_keys, algo::cuda::sort::value_arrays(d_x, d_y, d_z, d_w),
+                count, workspace, workspace_size)) != cudaSuccess) {
+            state.SkipWithError("sort_by_key ValueArrays32x4 failed");
+            break;
+        }
+
+        if (cudaEventRecord(stop) != cudaSuccess) {
+            state.SkipWithError("cudaEventRecord(stop) failed");
+            break;
+        }
+        if (cudaEventSynchronize(stop) != cudaSuccess) {
+            state.SkipWithError("cudaEventSynchronize failed");
+            break;
+        }
+
+        float elapsed_ms = 0.0f;
+        if (cudaEventElapsedTime(&elapsed_ms, start, stop) != cudaSuccess) {
+            state.SkipWithError("cudaEventElapsedTime failed");
+            break;
+        }
+        state.SetIterationTime(static_cast<double>(elapsed_ms) / 1000.0);
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
+                            static_cast<int64_t>(count));
+    state.SetBytesProcessed(
+        static_cast<int64_t>(state.iterations()) * static_cast<int64_t>(count) *
+        static_cast<int64_t>(sizeof(std::uint32_t) * 5u));
+
+    cleanup();
 }
 
 template <class T>
@@ -597,7 +782,7 @@ void run_cub_pairs_benchmark(benchmark::State& state) {
             d_temp_storage, temp_storage_bytes, d_keys, d_output_keys, d_values,
             d_output_values, count);
         if (status != cudaSuccess) {
-            state.SkipWithError("CUB sort_pairs failed");
+            state.SkipWithError("CUB sort_by_key failed");
             break;
         }
 
@@ -727,17 +912,21 @@ void apply_sort_args(benchmark::internal::Benchmark* bench) {
         run_benchmark<__VA_ARGS__, std::uint32_t>(state);                      \
     }
 
-#define DEFINE_SORT_PAIR_BENCHMARK(Name, ...)                                 \
+#define DEFINE_SORT_BY_KEY_BENCHMARK(Name, ...)                                 \
     void BM_##Name##_P32(benchmark::State& state) {                            \
-        run_pairs_benchmark<__VA_ARGS__, std::uint32_t>(state);                \
+        run_by_key_benchmark<__VA_ARGS__, std::uint32_t>(state);                \
     }                                                                          \
                                                                                \
     void BM_##Name##_P32x4(benchmark::State& state) {                          \
-        run_pairs_benchmark<__VA_ARGS__, Value32x4>(state);                    \
+        run_by_key_benchmark<__VA_ARGS__, Value32x4>(state);                    \
+    }                                                                          \
+                                                                               \
+    void BM_##Name##_VALUE_ARRAYS32x4(benchmark::State& state) {                         \
+        run_by_key_value_arrays32x4_benchmark<__VA_ARGS__>(state);                       \
     }
 
 SORT_BENCHMARKS(DEFINE_SORT_BENCHMARK)
-SORT_BENCHMARKS(DEFINE_SORT_PAIR_BENCHMARK)
+SORT_BENCHMARKS(DEFINE_SORT_BY_KEY_BENCHMARK)
 
 void BM_CUB(benchmark::State& state) {
     run_cub_benchmark<std::uint32_t>(state);
@@ -756,7 +945,8 @@ void BM_CUB_P32x4(benchmark::State& state) {
 
 #define REGISTER_SORT_PAIR_BENCHMARK(Name, ...)                             \
     BENCHMARK(BM_##Name##_P32)->UseManualTime()->Apply(apply_sort_args);       \
-    BENCHMARK(BM_##Name##_P32x4)->UseManualTime()->Apply(apply_sort_args);
+    BENCHMARK(BM_##Name##_P32x4)->UseManualTime()->Apply(apply_sort_args);      \
+    BENCHMARK(BM_##Name##_VALUE_ARRAYS32x4)->UseManualTime()->Apply(apply_sort_args);
 
 SORT_BENCHMARKS(REGISTER_SORT_BENCHMARK)
 BENCHMARK(BM_CUB)->UseManualTime()->Apply(apply_sort_args);
@@ -767,7 +957,7 @@ BENCHMARK(BM_CUB_P32x4)->UseManualTime()->Apply(apply_sort_args);
 
 #undef REGISTER_SORT_PAIR_BENCHMARK
 #undef REGISTER_SORT_BENCHMARK
-#undef DEFINE_SORT_PAIR_BENCHMARK
+#undef DEFINE_SORT_BY_KEY_BENCHMARK
 #undef DEFINE_SORT_BENCHMARK
 #undef SORT_BENCHMARKS
 

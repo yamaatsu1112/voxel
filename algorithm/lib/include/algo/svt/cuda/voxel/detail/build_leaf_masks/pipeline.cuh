@@ -56,9 +56,10 @@ inline cudaError_t build_leaf_masks(const VoxelEdit *edits, std::uint32_t count,
 
     // Sorting groups all voxels in the same leaf so the selected implementation
     // can emit one LeafMask per unique leaf key.
-    status = algo::cuda::sort::sort_pairs(
-        workspace.keys, workspace.local_bits, count, workspace.sort_workspace,
-        workspace.sort_workspace_size, stream);
+    status = algo::cuda::sort::sort_by_key(
+        workspace.keys, algo::cuda::sort::value_arrays(workspace.local_bits),
+        count, workspace.sort_workspace, workspace.sort_workspace_size,
+        stream);
     if (status != cudaSuccess)
         return status;
 

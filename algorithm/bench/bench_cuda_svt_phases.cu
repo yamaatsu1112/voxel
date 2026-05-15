@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -15,31 +14,75 @@ using algo::svt::cuda::VoxelEdit;
 using EditGenerator = std::vector<VoxelEdit> (*)(std::uint32_t);
 using BenchmarkGpuSvo = algo::svt::cuda::GpuSvo<(1u << 24), (1u << 24)>;
 
+inline constexpr std::int32_t kAlignedSphereCenter =
+    static_cast<std::int32_t>(algo::svt::cuda::kWorldVoxelCount / 2u);
+
+struct Sphere {
+    std::int32_t center_x;
+    std::int32_t center_y;
+    std::int32_t center_z;
+};
+
 bool has_cuda_device() {
     int count = 0;
     return cudaGetDeviceCount(&count) == cudaSuccess && count > 0;
 }
 
-std::uint32_t dense_side_for(std::uint32_t count) {
-    std::uint32_t side = static_cast<std::uint32_t>(
-        std::ceil(std::cbrt(static_cast<double>(count))));
-    side = std::max(side, 1u);
-    while (side * side * side < count)
-        ++side;
-    return side;
+std::uint64_t square(std::int64_t value) {
+    return static_cast<std::uint64_t>(value * value);
 }
 
-std::vector<VoxelEdit> make_dense_edits(std::uint32_t count) {
-    const std::uint32_t side = dense_side_for(count);
+bool voxel_inside_sphere(Sphere sphere, std::int32_t x, std::int32_t y,
+                         std::int32_t z, std::uint32_t radius) {
+    const std::int64_t dx = static_cast<std::int64_t>(x) - sphere.center_x;
+    const std::int64_t dy = static_cast<std::int64_t>(y) - sphere.center_y;
+    const std::int64_t dz = static_cast<std::int64_t>(z) - sphere.center_z;
+    return square(dx) + square(dy) + square(dz) <=
+           square(static_cast<std::int64_t>(radius));
+}
+
+Sphere centered_sphere() {
+    return {kAlignedSphereCenter, kAlignedSphereCenter, kAlignedSphereCenter};
+}
+
+Sphere half_overlap_sphere(std::uint32_t radius) {
+    return {kAlignedSphereCenter +
+                static_cast<std::int32_t>(radius / 2u),
+            kAlignedSphereCenter, kAlignedSphereCenter};
+}
+
+std::vector<VoxelEdit> make_voxel_sphere_edits(Sphere sphere,
+                                               std::uint32_t radius) {
     std::vector<VoxelEdit> edits;
-    edits.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i) {
-        const std::uint32_t x = i % side;
-        const std::uint32_t y = (i / side) % side;
-        const std::uint32_t z = i / (side * side);
-        edits.push_back(VoxelEdit{x, y, z});
-    }
+    const std::int32_t begin_x =
+        sphere.center_x - static_cast<std::int32_t>(radius);
+    const std::int32_t end_x =
+        sphere.center_x + static_cast<std::int32_t>(radius);
+    const std::int32_t begin_y =
+        sphere.center_y - static_cast<std::int32_t>(radius);
+    const std::int32_t end_y =
+        sphere.center_y + static_cast<std::int32_t>(radius);
+    const std::int32_t begin_z =
+        sphere.center_z - static_cast<std::int32_t>(radius);
+    const std::int32_t end_z =
+        sphere.center_z + static_cast<std::int32_t>(radius);
+
+    for (std::int32_t z = begin_z; z <= end_z; ++z)
+        for (std::int32_t y = begin_y; y <= end_y; ++y)
+            for (std::int32_t x = begin_x; x <= end_x; ++x)
+                if (voxel_inside_sphere(sphere, x, y, z, radius))
+                    edits.push_back(VoxelEdit{static_cast<std::uint32_t>(x),
+                                              static_cast<std::uint32_t>(y),
+                                              static_cast<std::uint32_t>(z)});
     return edits;
+}
+
+std::vector<VoxelEdit> make_sphere_edits(std::uint32_t radius) {
+    return make_voxel_sphere_edits(centered_sphere(), radius);
+}
+
+std::vector<VoxelEdit> make_half_overlap_sphere_edits(std::uint32_t radius) {
+    return make_voxel_sphere_edits(half_overlap_sphere(radius), radius);
 }
 
 std::uint32_t next_random(std::uint32_t &state) {
@@ -170,6 +213,7 @@ void destroy_events(cudaEvent_t start, cudaEvent_t stop) {
 }
 
 void set_voxel_edit_counters(benchmark::State &state, std::uint32_t count) {
+    state.counters["voxel_count"] = static_cast<double>(count);
     state.SetItemsProcessed(static_cast<int64_t>(state.iterations()) *
                             static_cast<int64_t>(count));
     state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) *
@@ -227,8 +271,9 @@ void BM_CudaSvtPhaseBuildLeafMasks(benchmark::State &state,
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto count = static_cast<std::uint32_t>(edits.size());
 
     DeviceBuffer<VoxelEdit> d_edits;
     DeviceBuffer<algo::svt::cuda::LeafMask> d_leaf_masks;
@@ -277,8 +322,9 @@ void BM_CudaSvtPhaseApplyLeafMasks(benchmark::State &state,
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto count = static_cast<std::uint32_t>(edits.size());
 
     DeviceBuffer<VoxelEdit> d_edits;
     DeviceBuffer<algo::svt::cuda::LeafMask> d_leaf_masks;
@@ -370,8 +416,9 @@ void BM_CudaSvtPhaseCollapseUniformPaths(benchmark::State &state,
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto count = static_cast<std::uint32_t>(edits.size());
 
     DeviceBuffer<VoxelEdit> d_edits;
     DeviceBuffer<algo::svt::cuda::LeafMask> d_leaf_masks;
@@ -476,8 +523,9 @@ void BM_CudaSvtAllocatePaths(benchmark::State &state,
         return;
     }
 
-    const auto count = static_cast<std::uint32_t>(state.range(0));
-    const auto edits = make_edits(count);
+    const auto edits =
+        make_edits(static_cast<std::uint32_t>(state.range(0)));
+    const auto count = static_cast<std::uint32_t>(edits.size());
 
     DeviceBuffer<VoxelEdit> d_edits;
     DeviceBuffer<algo::svt::cuda::LeafMask> d_leaf_masks;
@@ -582,6 +630,10 @@ void BM_CudaSvtAllocatePaths(benchmark::State &state,
 
 void apply_svt_args(benchmark::internal::Benchmark *bench) {
     bench->Arg(1 << 22)->Arg(1 << 24);
+}
+
+void apply_svt_sphere_args(benchmark::internal::Benchmark *bench) {
+    bench->Arg(128);
 }
 
 #define SVT_PHASE_ALLOCATE_CONFIGS(X)                                                  \
@@ -692,8 +744,14 @@ void apply_svt_args(benchmark::internal::Benchmark *bench) {
           algo::svt::cuda::HostLeafCountDispatch>)
 
 #define DEFINE_ALLOCATE_PATHS_BENCHMARK(Name, ...)                             \
-    void BM_CudaSvtAllocatePathsDense##Name(benchmark::State &state) {         \
-        BM_CudaSvtAllocatePaths<__VA_ARGS__>(state, make_dense_edits);         \
+    void BM_CudaSvtAllocatePathsSphere##Name(benchmark::State &state) {        \
+        BM_CudaSvtAllocatePaths<__VA_ARGS__>(state, make_sphere_edits);        \
+    }                                                                          \
+                                                                               \
+    void BM_CudaSvtAllocatePathsSphereHalfOverlap##Name(benchmark::State       \
+                                                            &state) {          \
+        BM_CudaSvtAllocatePaths<__VA_ARGS__>(                                  \
+            state, make_half_overlap_sphere_edits);                            \
     }                                                                          \
                                                                                \
     void BM_CudaSvtAllocatePathsRandom##Name(benchmark::State &state) {        \
@@ -704,8 +762,12 @@ SVT_PHASE_ALLOCATE_CONFIGS(DEFINE_ALLOCATE_PATHS_BENCHMARK)
 
 #undef DEFINE_ALLOCATE_PATHS_BENCHMARK
 
-void BM_CudaSvtPhaseBuildLeafMasksDense(benchmark::State &state) {
-    BM_CudaSvtPhaseBuildLeafMasks(state, make_dense_edits);
+void BM_CudaSvtPhaseBuildLeafMasksSphere(benchmark::State &state) {
+    BM_CudaSvtPhaseBuildLeafMasks(state, make_sphere_edits);
+}
+
+void BM_CudaSvtPhaseBuildLeafMasksSphereHalfOverlap(benchmark::State &state) {
+    BM_CudaSvtPhaseBuildLeafMasks(state, make_half_overlap_sphere_edits);
 }
 
 void BM_CudaSvtPhaseBuildLeafMasksRandom(benchmark::State &state) {
@@ -716,9 +778,14 @@ using RepresentativePhaseConfig = algo::svt::cuda::EditConfig<
     algo::svt::cuda::CompactAllDepthAllocation<algo::svt::cuda::Threadwise>,
     algo::svt::cuda::HostLeafCountDispatch>;
 
-void BM_CudaSvtPhaseApplyLeafMasksDense(benchmark::State &state) {
+void BM_CudaSvtPhaseApplyLeafMasksSphere(benchmark::State &state) {
     BM_CudaSvtPhaseApplyLeafMasks<RepresentativePhaseConfig>(state,
-                                                             make_dense_edits);
+                                                             make_sphere_edits);
+}
+
+void BM_CudaSvtPhaseApplyLeafMasksSphereHalfOverlap(benchmark::State &state) {
+    BM_CudaSvtPhaseApplyLeafMasks<RepresentativePhaseConfig>(
+        state, make_half_overlap_sphere_edits);
 }
 
 void BM_CudaSvtPhaseApplyLeafMasksRandom(benchmark::State &state) {
@@ -726,9 +793,15 @@ void BM_CudaSvtPhaseApplyLeafMasksRandom(benchmark::State &state) {
                                                              make_random_edits);
 }
 
-void BM_CudaSvtPhaseCollapseUniformPathsDense(benchmark::State &state) {
+void BM_CudaSvtPhaseCollapseUniformPathsSphere(benchmark::State &state) {
     BM_CudaSvtPhaseCollapseUniformPaths<RepresentativePhaseConfig>(
-        state, make_dense_edits);
+        state, make_sphere_edits);
+}
+
+void BM_CudaSvtPhaseCollapseUniformPathsSphereHalfOverlap(
+    benchmark::State &state) {
+    BM_CudaSvtPhaseCollapseUniformPaths<RepresentativePhaseConfig>(
+        state, make_half_overlap_sphere_edits);
 }
 
 void BM_CudaSvtPhaseCollapseUniformPathsRandom(benchmark::State &state) {
@@ -736,29 +809,41 @@ void BM_CudaSvtPhaseCollapseUniformPathsRandom(benchmark::State &state) {
         state, make_random_edits);
 }
 
-BENCHMARK(BM_CudaSvtPhaseBuildLeafMasksDense)
+BENCHMARK(BM_CudaSvtPhaseBuildLeafMasksSphere)
     ->UseManualTime()
-    ->Apply(apply_svt_args);
+    ->Apply(apply_svt_sphere_args);
+BENCHMARK(BM_CudaSvtPhaseBuildLeafMasksSphereHalfOverlap)
+    ->UseManualTime()
+    ->Apply(apply_svt_sphere_args);
 BENCHMARK(BM_CudaSvtPhaseBuildLeafMasksRandom)
     ->UseManualTime()
     ->Apply(apply_svt_args);
-BENCHMARK(BM_CudaSvtPhaseApplyLeafMasksDense)
+BENCHMARK(BM_CudaSvtPhaseApplyLeafMasksSphere)
     ->UseManualTime()
-    ->Apply(apply_svt_args);
+    ->Apply(apply_svt_sphere_args);
+BENCHMARK(BM_CudaSvtPhaseApplyLeafMasksSphereHalfOverlap)
+    ->UseManualTime()
+    ->Apply(apply_svt_sphere_args);
 BENCHMARK(BM_CudaSvtPhaseApplyLeafMasksRandom)
     ->UseManualTime()
     ->Apply(apply_svt_args);
-BENCHMARK(BM_CudaSvtPhaseCollapseUniformPathsDense)
+BENCHMARK(BM_CudaSvtPhaseCollapseUniformPathsSphere)
     ->UseManualTime()
-    ->Apply(apply_svt_args);
+    ->Apply(apply_svt_sphere_args);
+BENCHMARK(BM_CudaSvtPhaseCollapseUniformPathsSphereHalfOverlap)
+    ->UseManualTime()
+    ->Apply(apply_svt_sphere_args);
 BENCHMARK(BM_CudaSvtPhaseCollapseUniformPathsRandom)
     ->UseManualTime()
     ->Apply(apply_svt_args);
 
 #define REGISTER_ALLOCATE_PATHS_BENCHMARK(Name, ...)                           \
-    BENCHMARK(BM_CudaSvtAllocatePathsDense##Name)                              \
+    BENCHMARK(BM_CudaSvtAllocatePathsSphere##Name)                             \
         ->UseManualTime()                                                      \
-        ->Apply(apply_svt_args);                                               \
+        ->Apply(apply_svt_sphere_args);                                        \
+    BENCHMARK(BM_CudaSvtAllocatePathsSphereHalfOverlap##Name)                  \
+        ->UseManualTime()                                                      \
+        ->Apply(apply_svt_sphere_args);                                        \
     BENCHMARK(BM_CudaSvtAllocatePathsRandom##Name)                             \
         ->UseManualTime()                                                      \
         ->Apply(apply_svt_args);
