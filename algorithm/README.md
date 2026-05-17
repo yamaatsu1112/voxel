@@ -36,6 +36,61 @@ ctest --test-dir build --output-on-failure
 
 ## Benchmark
 
+### Selected results
+
+以下は Google Benchmark の `manual_time`。
+
+Voxel edit は、入力 voxel を leaf ごとの `LeafMask` にまとめてから、
+未生成の SVO path を生成し、leaf の bit を更新して、一様になった subtree を
+畳み込む。このうち path 生成のやり方を allocation policy として切り替えている。
+表には、まとめた後の leaf 数を host に読み出し、その数だけ後段 kernel を起動する
+`HostLeafCountDispatch` 構成の結果を載せている。
+
+| Allocation policy | Sphere, 8.78M voxels | Random, 16.78M voxels |
+|---|---:|---:|
+| `PlainDepthwise` | 5.37 ms / 1.64G voxels/s | 68.90 ms / 243M voxels/s |
+| `ScanDepthwise` | 5.15 ms / 1.70G voxels/s | 54.82 ms / 306M voxels/s |
+| `AllDepth` | 5.08 ms / 1.73G voxels/s | 57.09 ms / 294M voxels/s |
+| `CompactAllDepth` | 5.00 ms / 1.76G voxels/s | 43.55 ms / 385M voxels/s |
+
+Policy の見方:
+
+- `PlainDepthwise`: 各 depth で tree を見て欠けている child を集めて確保する基準実装。
+- `ScanDepthwise`: 各 leaf で最初に欠けている depth を先に記録し、depth ごとに必要な request だけを prefix sum で詰める。
+- `AllDepth`: 全 depth の生成 request を一度に集め、初期化、接続、counter 更新を一括で行う。
+- `CompactAllDepth`: depth ごとの request record ではなく leaf ごとの request count を用いて path を生成し、中間データと kernel 起動回数を減らす。
+
+Terminal edit は、SVO の構造に沿って一様に埋まる領域を 1 つの
+terminal node として表し、球の境界だけを terminal leaf mask で表す。
+8.78M voxels の球を約 26.76k terminal inputs で表現して、
+`place_terminal_edits` 全体を測る。
+
+| Edit representation | Case | Inputs | Covered voxels | Time | Effective throughput |
+|---|---|---:|---:|---:|---:|
+| Voxel edits | Sphere | 8.78M voxels | 8.78M | 5.34 ms | 1.64G voxels/s |
+| Terminal edits | Aligned sphere | 26.76k terminals | 8.78M | 0.459 ms | 19.1G voxels/s |
+| Terminal edits | Unaligned sphere | 26.76k terminals | 8.78M | 1.13 ms | 7.78G voxels/s |
+| Terminal edits | Half-overlap sphere | 26.76k terminals | 8.78M | 0.566 ms | 15.5G voxels/s |
+
+Terminal case の見方:
+
+- `Aligned sphere`: terminal input を world offset なしで置く。
+- `Unaligned sphere`: 同じ terminal input に `(1, 1, 1)` の world offset を付け、SVO cell 境界からずれた編集を測る。
+- `Half-overlap sphere`: 先に中央の sphere を置いた SVO に、半径の半分だけ x 方向へずらした sphere を置き、既存 subtree との重なりを含む編集を測る。
+
+### Environment
+
+- GPU: NVIDIA GeForce RTX 3070, 8 GiB, compute capability 8.6, 220 W power limit
+- NVIDIA driver: 595.71.05
+- CUDA toolkit: 13.2.1 / nvcc 13.2.78
+- CPU: Intel Core i7-10700, 8 cores / 16 threads, up to 4.8 GHz
+- Memory: 15 GiB
+- OS: Arch Linux, Linux 7.0.3-arch1-2 x86_64
+- Compiler: GCC 16.1.1
+- CMake: 4.3.2
+
+### Run
+
 ```bash
 cmake --build build
 ./build/bench/bench_cuda_svt
@@ -43,16 +98,12 @@ cmake --build build
 
 CUDA ベンチは Google Benchmark で書いている。ビルド時に CUDA compiler が見つかった場合だけ `bench/` 以下の CUDA benchmark target が作られる。
 
-### Recommended
-
 ```bash
 ./build/bench/bench_cuda_svt_phases --benchmark_filter='.*(ScanDepthwise|CompactAllDepthHostLeafCountDispatch).*Random.*'
 ./build/bench/bench_cuda_svt --benchmark_filter='.*Place.*(ScanDepthwise|CompactAllDepthHostLeafCountDispatch).*'
 ./build/bench/bench_cuda_svt_terminal
 ./build/bench/bench_cuda_svt_terminal_phases
 ```
-
-`bench_cuda_svt_phases` は、allocation policy として `ScanDepthwise` / `CompactAllDepthHostLeafCountDispatch` を比較し、入力は `Random` に絞る。`bench_cuda_svt` は同じ policy の `Place` 系ベンチを見る。terminal edit 系はまず全体を見るため、filter なしで実行する。
 
 ### Benchmarks
 
