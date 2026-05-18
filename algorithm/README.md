@@ -46,12 +46,21 @@ Voxel edit は、入力 voxel を leaf ごとの `LeafMask` にまとめてか�
 表には、まとめた後の leaf 数を host に読み出し、その数だけ後段 kernel を起動する
 `HostLeafCountDispatch` 構成の結果を載せている。
 
-| Allocation policy | Sphere, 8.78M voxels | Random, 16.78M voxels |
+| Allocation policy | Sphere, 8.78M voxels / 144k leaves | Random, 16.78M voxels / 15.80M leaves |
 |---|---:|---:|
 | `PlainDepthwise` | 5.37 ms / 1.64G voxels/s | 68.90 ms / 243M voxels/s |
 | `ScanDepthwise` | 5.15 ms / 1.70G voxels/s | 54.82 ms / 306M voxels/s |
 | `AllDepth` | 5.08 ms / 1.73G voxels/s | 57.09 ms / 294M voxels/s |
 | `CompactAllDepth` | 5.00 ms / 1.76G voxels/s | 43.55 ms / 385M voxels/s |
+
+Allocate phase だけの比較を以下に載せる。
+
+| Allocation policy | Sphere, 8.78M voxels / 144k leaves | Random, 16.78M voxels / 15.80M leaves |
+|---|---:|---:|
+| `PlainDepthwise` | 0.420 ms / 20.9G voxels/s | 32.7 ms / 513M voxels/s |
+| `ScanDepthwise` | 0.217 ms / 40.5G voxels/s | 21.9 ms / 765M voxels/s |
+| `AllDepth` | 0.147 ms / 59.8G voxels/s | 23.2 ms / 723M voxels/s |
+| `CompactAllDepth` | 0.0672 ms / 131G voxels/s | 8.99 ms / 1.87G voxels/s |
 
 Policy の見方:
 
